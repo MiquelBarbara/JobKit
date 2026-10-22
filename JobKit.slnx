@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="JobKit.vcxproj" Id="525cd2dc-59a9-4980-ae46-e76f14c922bd" />
+</Solution>
