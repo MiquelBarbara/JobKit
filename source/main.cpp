@@ -24,6 +24,7 @@ static bool testPush(ThreadPool& pool, std::mutex& outputMutex)
     {
         pool.push({
             TaskType::Execute,
+            // Each task owns its job index; referenced records remain alive through wait().
             [&outputMutex, &visits, job](std::vector<Parameter> const&) {
                 {
                     std::lock_guard lock(outputMutex);
@@ -37,6 +38,7 @@ static bool testPush(ThreadPool& pool, std::mutex& outputMutex)
         });
     }
 
+    // Completion synchronizes worker writes with the checks below.
     pool.wait();
     const bool passed = std::all_of(visits.begin(), visits.end(),
         [](int count) { return count == 1; });
@@ -79,7 +81,9 @@ static bool testDispatchCase(ThreadPool& pool, std::mutex& outputMutex,
 
     // All referenced test data stays alive until its callbacks have finished.
     pool.wait();
+    // Batch execution order is unspecified, so compare ranges in sorted order.
     std::sort(actualRanges.begin(), actualRanges.end());
+    // Matching ranges checks batching; visit counts detect skipped/duplicate elements.
     const bool passed = validRanges && actualRanges == expectedRanges
         && std::all_of(visits.begin(), visits.end(),
             [](int count) { return count == 1; });
@@ -92,6 +96,8 @@ static bool testDispatchCase(ThreadPool& pool, std::mutex& outputMutex,
 static bool testDispatch(ThreadPool& pool, std::mutex& outputMutex)
 {
     bool passed = true;
+    // Repeated dispatch/wait calls also exercise reuse of the same pool.
+    // Evaluate each test first so an earlier failure does not skip later cases.
     passed = testDispatchCase(pool, outputMutex, 10, 4,
         {{0, 4}, {4, 8}, {8, 10}}) && passed;
     passed = testDispatchCase(pool, outputMutex, 0, 4, {}) && passed;
@@ -105,6 +111,7 @@ static bool testDispatch(ThreadPool& pool, std::mutex& outputMutex)
 
 int main()
 {
+    // Locals are destroyed in reverse order: the output mutex must outlive the pool.
     std::mutex outputMutex;
     ThreadPool pool{4};
     bool passed = true;
