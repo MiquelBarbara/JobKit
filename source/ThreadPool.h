@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <mutex>
 #include <condition_variable>
+#include <algorithm>
 
 #include "ThreadQueue.h"
 #include "Task.h"
@@ -70,6 +71,28 @@ public:
 		_unfinished_tasks++;
 		_queue.push(task);
 		return true;
+	}
+
+	void dispatch( std::size_t elementCount, std::size_t batchSize, std::function<void(std::size_t, std::size_t)> operation)
+	{
+		if(elementCount == 0 || batchSize == 0)
+		{
+			return;
+		}
+
+		for(std::size_t i = 0; i < elementCount; i += batchSize)
+		{
+			const std::size_t count = std::min(batchSize, elementCount - i);
+			const std::size_t end = i + count;
+
+			push({
+				TaskType::Execute,
+				[operation, i, end](std::vector<Parameter> const&) {
+					operation(i, end);
+				},
+				{}
+			});
+		}
 	}
 
 	void wait()
