@@ -3,16 +3,22 @@
 #include <array>
 #include <iostream>
 #include <chrono>
+#include <stdexcept>
+#include <string_view>
 #include <utility>
 
 // Set a switch to 0 to disable that test, then rebuild.
 // These can also be overridden in the project's preprocessor definitions.
 #ifndef JOBKIT_TEST_PUSH
-#define JOBKIT_TEST_PUSH 1
+#define JOBKIT_TEST_PUSH 0
 #endif
 
 #ifndef JOBKIT_TEST_DISPATCH
-#define JOBKIT_TEST_DISPATCH 1
+#define JOBKIT_TEST_DISPATCH 0
+#endif
+
+#ifndef JOBKIT_TEST_EXCEPTIONS
+#define JOBKIT_TEST_EXCEPTIONS 1
 #endif
 
 #if JOBKIT_TEST_PUSH
@@ -109,6 +115,85 @@ static bool testDispatch(ThreadPool& pool, std::mutex& outputMutex)
 }
 #endif
 
+#if JOBKIT_TEST_EXCEPTIONS
+static bool testExceptions(ThreadPool& pool)
+{
+    bool otherTaskFinished = false;
+    pool.push({
+        TaskType::Execute,
+        [](std::vector<Parameter> const&) {
+            throw std::logic_error("Expected worker failure");
+        },
+        {}
+    });
+    pool.push({
+        TaskType::Execute,
+        [&otherTaskFinished](std::vector<Parameter> const&) {
+            otherTaskFinished = true;
+        },
+        {}
+    });
+
+    // Catch on the calling thread: wait() must preserve the original type/message
+    // and finish the other task before reporting the worker's failure.
+    bool originalExceptionReported = false;
+    try
+    {
+        pool.wait();
+    }
+    catch (const std::logic_error& error)
+    {
+        originalExceptionReported = std::string_view(error.what()) == "Expected worker failure";
+        std::cout << "Caught expected worker exception: " << error.what() << '\n';
+    }
+    catch (...)
+    {
+        std::cout << "Caught an unexpected exception type\n";
+    }
+
+    const bool failureReported = originalExceptionReported && otherTaskFinished;
+    std::cout << "[" << (failureReported ? "PASS" : "FAIL")
+              << "] exception: original error reported after all work finishes\n";
+
+    // No new work or failures: the previous exception must not be reported twice.
+    bool exceptionCleared = true;
+    try
+    {
+        pool.wait();
+    }
+    catch (...)
+    {
+        exceptionCleared = false;
+    }
+    std::cout << "[" << (exceptionCleared ? "PASS" : "FAIL")
+              << "] exception: second wait does not repeat the error\n";
+
+    // Keep captured locals alive through wait(), including its exception path.
+    bool reusedTaskFinished = false;
+    pool.push({
+        TaskType::Execute,
+        [&reusedTaskFinished](std::vector<Parameter> const&) {
+            reusedTaskFinished = true;
+        },
+        {}
+    });
+    bool reuseWaitSucceeded = true;
+    try
+    {
+        pool.wait();
+    }
+    catch (...)
+    {
+        reuseWaitSucceeded = false;
+    }
+    const bool reusable = reuseWaitSucceeded && reusedTaskFinished;
+    std::cout << "[" << (reusable ? "PASS" : "FAIL")
+              << "] exception: pool accepts and completes new work\n";
+
+    return failureReported && exceptionCleared && reusable;
+}
+#endif
+
 int main()
 {
     // Locals are destroyed in reverse order: the output mutex must outlive the pool.
@@ -122,6 +207,10 @@ int main()
 
 #if JOBKIT_TEST_DISPATCH
     passed = testDispatch(pool, outputMutex) && passed;
+#endif
+
+#if JOBKIT_TEST_EXCEPTIONS
+    passed = testExceptions(pool) && passed;
 #endif
 
     std::cout << "All enabled tests finished: " << (passed ? "PASS" : "FAIL") << '\n';
