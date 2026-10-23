@@ -1,5 +1,6 @@
 #include "ThreadPool.h"
 #include <iostream>
+#include <chrono>
 
 int main()
 {
@@ -24,4 +25,8 @@ int main()
             });
         job_n++;
     }
+
+	my_pool.wait();
+
+	std::cout << "All tasks finished, exiting main thread " << std::this_thread::get_id() << '\n';
 }

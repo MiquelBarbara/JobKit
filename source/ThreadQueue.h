@@ -24,14 +24,10 @@ public:
 		return task;
 	}
 
-	bool empty() const
-	{
-		std::lock_guard<std::mutex> lock(_mutex);
-		return _queue.empty();
-	}
+
 
 private:
 	std::queue<T> _queue;
-	std::mutex _mutex;
+	mutable std::mutex _mutex;
 	std::condition_variable _condition;
 };
