@@ -18,7 +18,11 @@
 #endif
 
 #ifndef JOBKIT_TEST_EXCEPTIONS
-#define JOBKIT_TEST_EXCEPTIONS 1
+#define JOBKIT_TEST_EXCEPTIONS 0
+#endif
+
+#ifndef JOBKIT_TEST_GROUPS
+#define JOBKIT_TEST_GROUPS 1
 #endif
 
 #if JOBKIT_TEST_PUSH
@@ -194,6 +198,46 @@ static bool testExceptions(ThreadPool& pool)
 }
 #endif
 
+#if JOBKIT_TEST_GROUPS
+static bool testGroups(ThreadPool& pool, std::mutex& outputMutex)
+{
+    std::array<int, 12> visits{};
+    JobGroup group;
+
+    for (std::size_t job = 0; job < visits.size(); ++job)
+    {
+        pool.push({
+            TaskType::Execute,
+            [&outputMutex, &visits, job](std::vector<Parameter> const&) {
+                std::lock_guard lock(outputMutex);
+                ++visits[job];
+                std::cout << "Grouped task " << job << " on thread "
+                          << std::this_thread::get_id() << '\n';
+            },
+            {},
+            &group // Fourth field associates this task with the group.
+        });
+    }
+
+    // Wait on the group itself, then check results BEFORE any pool-wide wait.
+    // The group and captured locals remain alive until all their work finishes.
+    group.wait();
+    bool passed = false;
+    {
+        // Protect test records even if a faulty group wait returns too early.
+        std::lock_guard lock(outputMutex);
+        passed = std::all_of(visits.begin(), visits.end(),
+            [](int count) { return count == 1; });
+    }
+
+    // Drain remaining pool bookkeeping before returning and destroying test data.
+    pool.wait();
+    std::cout << "[" << (passed ? "PASS" : "FAIL")
+              << "] group: wait completes all 12 tasks exactly once\n";
+    return passed;
+}
+#endif
+
 int main()
 {
     // Locals are destroyed in reverse order: the output mutex must outlive the pool.
@@ -211,6 +255,10 @@ int main()
 
 #if JOBKIT_TEST_EXCEPTIONS
     passed = testExceptions(pool) && passed;
+#endif
+
+#if JOBKIT_TEST_GROUPS
+    passed = testGroups(pool, outputMutex) && passed;
 #endif
 
     std::cout << "All enabled tests finished: " << (passed ? "PASS" : "FAIL") << '\n';

@@ -3,6 +3,7 @@
 #include <atomic>
 #include <mutex>
 #include <condition_variable>
+#include <utility>
 
 template <typename T>
 // Shared FIFO: the mutex protects queue access, not the data used by a task.
@@ -25,7 +26,7 @@ public:
 		// the predicate. Rechecking handles spurious wakeups and competing consumers.
 		_condition.wait(lock, [this] { return !_queue.empty(); });
 		// Checking and removing the front entry happen under the same lock.
-		T task = _queue.front();
+		T task = std::move(_queue.front());
 		_queue.pop();
 		// Returning releases the lock; the worker executes its local task afterward.
 		return task;

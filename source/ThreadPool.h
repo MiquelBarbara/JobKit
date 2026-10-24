@@ -10,6 +10,7 @@
 #include <exception>
 
 #include "ThreadQueue.h"
+#include "JobGroup.h"
 #include "Task.h"
 
 // Use at least one worker. Task exceptions are caught and the first recorded failure
@@ -42,24 +43,33 @@ private:
 					switch (elem.type)
 					{
 					case TaskType::Execute:
+					{
 						// Execute without either mutex held so other tasks can run or submit.
 						// Preserve a task's exception for the waiting caller, then record completion.
+						std::exception_ptr taskError = nullptr;
 						try
 						{
 							elem.task(elem.arguments);
 						}
 						catch (...)
 						{
+							taskError = std::current_exception();
+
 							std::unique_lock<std::mutex> lock(_exception_mutex);
 							if (!_exception)
 							{
-								_exception = std::current_exception();
+								_exception = taskError;
 							}
+						}
+
+						if (elem.group)
+						{
+							elem.group->finishTask(taskError);
 						}
 
 						decreaseUnfinishedTasks();
 						break;
-
+					}
 					case TaskType::Stop:
 						// push() counts Stop entries too, so balance the counter before exiting.
 						decreaseUnfinishedTasks();
@@ -100,13 +110,33 @@ public:
 	
 	bool push(Task const& task)
 	{
+
 		std::unique_lock<std::mutex> lock(_mutex);
-		_queue.push(task);
+
+		if (task.type == TaskType::Execute && task.group)
+		{
+			task.group->addTask();
+		}
+
+		try
+		{
+			_queue.push(task);
+		}
+		catch (...)
+		{
+			if (task.type == TaskType::Execute && task.group)
+			{
+				task.group->finishTask();
+			}
+			throw;
+		}
+
+
 		_unfinished_tasks++;
 		return true;
 	}
 
-	void dispatch( std::size_t elementCount, std::size_t batchSize, std::function<void(std::size_t, std::size_t)> operation)
+	void dispatch( std::size_t elementCount, std::size_t batchSize, std::function<void(std::size_t, std::size_t)> operation, JobGroup* group = nullptr)
 	{
 		// This version treats both empty input and zero batch size as a no-op.
 		if(elementCount == 0 || batchSize == 0)
@@ -129,7 +159,8 @@ public:
 					// The caller's operation loops over the elements in this range.
 					operation(i, end);
 				},
-				{}
+				{},
+				group
 			});
 
 			i = end;

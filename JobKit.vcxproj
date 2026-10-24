@@ -139,6 +139,7 @@
     </Manifest>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="source\JobGroup.h" />
     <ClInclude Include="source\Task.h" />
     <ClInclude Include="source\ThreadPool.h" />
     <ClInclude Include="source\ThreadQueue.h" />
