@@ -7,6 +7,7 @@ class JobGroup
 {
 public:
 	friend class ThreadPool;
+	friend class JobGraph;
 
 	void wait()
 	{

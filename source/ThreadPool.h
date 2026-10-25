@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <exception>
 
+
 #include "ThreadQueue.h"
 #include "JobGroup.h"
 #include "Task.h"
@@ -39,42 +40,36 @@ private:
 			[&queue, this] {
 				while (true)
 				{
-					auto const elem = queue.pop();
-					switch (elem.type)
+					auto const entry = queue.pop();
+					if (!entry)
 					{
-					case TaskType::Execute:
-					{
-						// Execute without either mutex held so other tasks can run or submit.
-						// Preserve a task's exception for the waiting caller, then record completion.
-						std::exception_ptr taskError = nullptr;
-						try
-						{
-							elem.task(elem.arguments);
-						}
-						catch (...)
-						{
-							taskError = std::current_exception();
-
-							std::unique_lock<std::mutex> lock(_exception_mutex);
-							if (!_exception)
-							{
-								_exception = taskError;
-							}
-						}
-
-						if (elem.group)
-						{
-							elem.group->finishTask(taskError);
-						}
-
-						decreaseUnfinishedTasks();
-						break;
-					}
-					case TaskType::Stop:
-						// push() counts Stop entries too, so balance the counter before exiting.
-						decreaseUnfinishedTasks();
 						return;
 					}
+
+					const Task& elem = *entry;
+
+					std::exception_ptr taskError = nullptr;
+					try
+					{
+						elem.task(elem.arguments);
+					}
+					catch (...)
+					{
+						taskError = std::current_exception();
+
+						std::unique_lock<std::mutex> lock(_exception_mutex);
+						if (!_exception)
+						{
+							_exception = taskError;
+						}
+					}
+
+					if (elem.group)
+					{
+						elem.group->finishTask(taskError);
+					}
+
+					decreaseUnfinishedTasks();
 				}
 			}
 		};
@@ -88,24 +83,24 @@ public:
 		{
 			throw std::invalid_argument("Number of threads must be positive");
 		}
-		// Create workers once; each worker repeatedly takes entries from the queue.
-		for (std::size_t i = 0; i < numThreads; i++)
-		{
-			_threads.push_back(makeThreadHandler(_queue));
+
+		_threads.reserve(numThreads);
+		try {
+			// Create workers once; each worker repeatedly takes entries from the queue.
+			for (std::size_t i = 0; i < numThreads; i++)
+			{
+				_threads.push_back(makeThreadHandler(_queue));
+			}
+		}
+		catch (...) {
+			_queue.close();
+			throw;
 		}
 	}
 
 	~ThreadPool()
 	{
-		// One Stop entry per worker. FIFO order puts these after already queued work.
-		// Workers must not submit more work during shutdown, as it could follow Stop.
-		const Task stop_task{ TaskType::Stop, {}, {} };
-		for (std::size_t i = 0; i < _threads.size(); i++)
-		{
-			push(stop_task);
-		}
-		// After this body, destroying _threads joins workers before queue/state cleanup.
-		// jthread's stop request alone does not wake our queue; Stop entries do that.
+		_queue.close();
 	}
 	
 	bool push(Task const& task)
@@ -113,7 +108,7 @@ public:
 
 		std::unique_lock<std::mutex> lock(_mutex);
 
-		if (task.type == TaskType::Execute && task.group)
+		if (task.group)
 		{
 			task.group->addTask();
 		}
@@ -124,7 +119,7 @@ public:
 		}
 		catch (...)
 		{
-			if (task.type == TaskType::Execute && task.group)
+			if (task.group)
 			{
 				task.group->finishTask();
 			}
@@ -152,7 +147,6 @@ public:
 			const std::size_t end = i + count;
 
 			push({
-				TaskType::Execute,
 				// Own a copy of the operation and range; the loop may finish before execution.
 				// References captured inside operation still need to outlive the task.
 				[operation, i, end](std::vector<Parameter> const&) {
