@@ -5,9 +5,11 @@
 #include <cstddef>
 #include <stdexcept>
 #include <utility>
+#include <exception>
 
 #include "JobNode.h"
 #include "JobGroup.h"
+#include "ThreadPool.h"
 
 class JobGraph
 {
@@ -92,6 +94,111 @@ private:
 		}
 	}
 
+	std::vector<JobNode*> prepareSubmission()
+	{
+		if (_submitted)
+		{
+			throw std::runtime_error("Cannot submit a JobGraph more than once");
+		}
+
+		validate();
+		std::vector<JobNode*> roots;
+		for (const auto& node : _nodes)
+		{
+			if (node->prerequisiteCounter.load() == 0)
+			{
+				roots.push_back(node.get());
+			}
+
+		}
+
+		_submitted = true;
+		for (const auto& node : _nodes)
+		{
+			node->_sealed = true;
+			_completion.addTask();
+
+
+			if (node->task.group)
+			{
+				node->task.group->addTask();
+			}
+		}
+
+		return roots;
+	}
+
+	void executeNode(ThreadPool& pool, JobNode& node) 
+	{
+		node.state.store(JobState::Running);
+		JobState result = JobState::Succeeded;
+		std::exception_ptr error = nullptr;
+
+		try 
+		{
+			node.task.task(node.task.arguments);
+		}
+		catch (...)
+		{
+			result = JobState::Failed;
+			error = std::current_exception();
+		}
+
+		finishNode(pool, node, result, error);
+	}
+
+	void finishNode(ThreadPool& pool, JobNode& node, JobState result, std::exception_ptr error = nullptr) 
+	{
+		node.state.store(result);
+		for (const auto& dependent : node.dependents)
+		{
+			if (result == JobState::Failed || result == JobState::Skipped)
+			{
+				dependent->failedPrerequisite.store(true);
+			}
+
+			auto& counter = dependent->prerequisiteCounter;
+			if (counter.fetch_sub(1) == 1)
+			{
+				if (dependent->failedPrerequisite.load())
+				{
+					finishNode(pool, *dependent, JobState::Skipped);
+				}
+				else
+				{
+					scheduleNode(pool, *dependent);
+				}
+			}
+		}
+
+
+		if (node.task.group)
+		{
+			node.task.group->finishTask(error);
+		}
+
+		_completion.finishTask(error);
+	}
+
+	void scheduleNode(ThreadPool& pool, JobNode& node)
+	{
+		try
+		{
+			pool.push({
+				[this, &pool, &node](std::vector<Parameter> const&) {
+					executeNode(pool, node);
+				},
+				{},
+				nullptr
+				});
+
+		}
+		catch (...)
+		{
+			finishNode(pool, node, JobState::Failed, std::current_exception());
+		}
+	}
+
 public:
 	JobNode& createJob(Task task)
 	{
@@ -101,6 +208,15 @@ public:
 		}
 		_nodes.push_back(std::make_unique<JobNode>(std::move(task)));
 		return *_nodes.back();
+	}
+
+	void submit(ThreadPool& pool)
+	{
+		auto roots = prepareSubmission();
+		for (JobNode* node : roots)
+		{
+			scheduleNode(pool, *node);
+		}
 	}
 
 	void wait()

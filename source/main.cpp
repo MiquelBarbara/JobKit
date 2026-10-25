@@ -40,6 +40,10 @@
 #define JOBKIT_TEST_GRAPH_VALIDATION 1
 #endif
 
+#ifndef JOBKIT_TEST_GRAPH_EXECUTION
+#define JOBKIT_TEST_GRAPH_EXECUTION 1
+#endif
+
 #if JOBKIT_TEST_PUSH
 static bool testPush(ThreadPool& pool, std::mutex& outputMutex)
 {
@@ -482,6 +486,183 @@ static bool testGraphValidation()
 }
 #endif
 
+#if JOBKIT_TEST_GRAPH_EXECUTION
+static bool testGraphExecution(ThreadPool& pool)
+{
+    bool passed = true;
+    auto report = [&passed](bool result, std::string_view name) {
+        std::cout << "[" << (result ? "PASS" : "FAIL")
+                  << "] graph execution: " << name << '\n';
+        passed = result && passed;
+    };
+    auto allOnce = [](const auto& visits) {
+        return std::all_of(visits.begin(), visits.end(),
+            [](const std::atomic<int>& count) { return count.load() == 1; });
+    };
+    auto waitSuccessfully = [](JobGraph& graph) {
+        try
+        {
+            graph.wait();
+            return true;
+        }
+        catch (...)
+        {
+            return false;
+        }
+    };
+
+    {
+        JobGraph graph;
+        graph.submit(pool);
+        report(waitSuccessfully(graph), "empty graph completes");
+    }
+    {
+        std::array<std::atomic<int>, 3> visits{};
+        std::atomic<bool> ordered{true};
+        JobGroup leafGroup;
+        std::promise<void> releaseRoot;
+        auto rootGate = releaseRoot.get_future().share();
+        JobGraph graph;
+        auto& a = graph.createJob({
+            [&visits, rootGate](std::vector<Parameter> const&) {
+                rootGate.wait();
+                ++visits[0];
+            }, {}});
+        auto& b = graph.createJob({
+            [&](std::vector<Parameter> const&) {
+                if (visits[0].load() != 1) ordered.store(false);
+                ++visits[1];
+            }, {}});
+        auto& c = graph.createJob({
+            [&](std::vector<Parameter> const&) {
+                if (visits[1].load() != 1) ordered.store(false);
+                ++visits[2];
+            }, {}, &leafGroup});
+        b.dependsOn(a);
+        c.dependsOn(b);
+        graph.submit(pool);
+
+        // Only C belongs to this group. It must be counted even while A is blocked
+        // and C has not entered the pool queue yet.
+        auto leafWaiter = std::async(std::launch::async, [&] { leafGroup.wait(); });
+        const bool leafWasPending = leafWaiter.wait_for(std::chrono::milliseconds{50})
+            == std::future_status::timeout;
+        releaseRoot.set_value(); // Always unblock the root before joining the waiter.
+        bool leafWaitSucceeded = true;
+        try { leafWaiter.get(); }
+        catch (...) { leafWaitSucceeded = false; }
+        const bool leafFinished = allOnce(visits);
+        const bool graphFinished = waitSuccessfully(graph);
+        report(graphFinished && ordered.load() && allOnce(visits),
+            "chain runs A then B then C exactly once");
+        report(leafWasPending && leafWaitSucceeded && leafFinished,
+            "optional group counts dependent work before it is queued");
+        pool.wait(); // Keep nodes and captures alive through pool bookkeeping too.
+    }
+    {
+        // This overlap check needs at least two pool workers.
+        std::array<std::atomic<int>, 4> visits{};
+        std::atomic<bool> ordered{true};
+        std::promise<void> bStarted;
+        std::promise<void> cStarted;
+        auto bStartedFuture = bStarted.get_future();
+        auto cStartedFuture = cStarted.get_future();
+        std::promise<void> releaseBranches;
+        auto branchGate = releaseBranches.get_future().share();
+        JobGraph graph;
+        auto& a = graph.createJob({
+            [&](std::vector<Parameter> const&) { ++visits[0]; }, {}});
+        auto& b = graph.createJob({
+            [&, branchGate](std::vector<Parameter> const&) {
+                if (visits[0].load() != 1) ordered.store(false);
+                bStarted.set_value();
+                branchGate.wait();
+                ++visits[1];
+            }, {}});
+        auto& c = graph.createJob({
+            [&, branchGate](std::vector<Parameter> const&) {
+                if (visits[0].load() != 1) ordered.store(false);
+                cStarted.set_value();
+                branchGate.wait();
+                ++visits[2];
+            }, {}});
+        auto& d = graph.createJob({
+            [&](std::vector<Parameter> const&) {
+                if (visits[1].load() != 1 || visits[2].load() != 1)
+                    ordered.store(false);
+                ++visits[3];
+            }, {}});
+        b.dependsOn(a);
+        c.dependsOn(a);
+        d.dependsOn(b);
+        d.dependsOn(c);
+        graph.submit(pool);
+        const bool bIsRunning = bStartedFuture.wait_for(std::chrono::seconds{5})
+            == std::future_status::ready;
+        const bool cIsRunning = cStartedFuture.wait_for(std::chrono::seconds{5})
+            == std::future_status::ready;
+        const bool dStillPending = visits[3].load() == 0;
+        releaseBranches.set_value();
+        const bool graphFinished = waitSuccessfully(graph);
+        report(graphFinished && bIsRunning && cIsRunning,
+            "diamond branches B and C can overlap");
+        report(graphFinished && dStillPending && ordered.load() && allOnce(visits),
+            "diamond runs D only after both prerequisites, exactly once");
+        pool.wait();
+    }
+    {
+        std::array<std::atomic<int>, 5> visits{};
+        std::atomic<bool> ordered{true};
+        JobGroup failedBranch;
+        JobGraph graph;
+        auto& a = graph.createJob({
+            [&](std::vector<Parameter> const&) {
+                ++visits[0];
+                throw std::logic_error("Expected graph failure");
+            }, {}, &failedBranch});
+        auto& b = graph.createJob({
+            [&](std::vector<Parameter> const&) { ++visits[1]; }, {}, &failedBranch});
+        auto& c = graph.createJob({
+            [&](std::vector<Parameter> const&) { ++visits[2]; }, {}, &failedBranch});
+        auto& independent = graph.createJob({
+            [&](std::vector<Parameter> const&) { ++visits[3]; }, {}});
+        auto& independentChild = graph.createJob({
+            [&](std::vector<Parameter> const&) {
+                if (visits[3].load() != 1) ordered.store(false);
+                ++visits[4];
+            }, {}});
+        b.dependsOn(a);
+        c.dependsOn(b);
+        independentChild.dependsOn(independent);
+        graph.submit(pool);
+
+        bool originalError = false;
+        try { graph.wait(); }
+        catch (const std::logic_error& error) {
+            originalError = std::string_view(error.what()) == "Expected graph failure";
+        }
+        catch (...) {}
+        report(originalError, "wait reports the original task failure");
+        report(visits[0].load() == 1 && visits[1].load() == 0 && visits[2].load() == 0,
+            "failed job skips its child and grandchild");
+        report(ordered.load() && visits[3].load() == 1 && visits[4].load() == 1,
+            "unrelated branch continues after a failure");
+
+        // Failed and skipped nodes must all finish group accounting.
+        bool groupError = false;
+        try { failedBranch.wait(); }
+        catch (const std::logic_error& error) {
+            groupError = std::string_view(error.what()) == "Expected graph failure";
+        }
+        catch (...) {}
+        report(groupError, "optional group completes failed and skipped nodes");
+        report(waitSuccessfully(graph), "second wait does not repeat the old error");
+        pool.wait();
+    }
+    return passed;
+}
+#endif
+
 int main()
 {
     // Locals are destroyed in reverse order: the output mutex must outlive the pool.
@@ -515,6 +696,10 @@ int main()
 
 #if JOBKIT_TEST_GRAPH_VALIDATION
     passed = testGraphValidation() && passed;
+#endif
+
+#if JOBKIT_TEST_GRAPH_EXECUTION
+    passed = testGraphExecution(pool) && passed;
 #endif
 
     std::cout << "All enabled tests finished: " << (passed ? "PASS" : "FAIL") << '\n';
