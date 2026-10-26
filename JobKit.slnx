@@ -3,5 +3,6 @@
     <Platform Name="x64" />
     <Platform Name="x86" />
   </Configurations>
+  <Project Path="playground/JobKit.Playground.vcxproj" Id="9cc43591-c72e-49b9-bc64-4cd657e88809" />
   <Project Path="JobKit.vcxproj" Id="525cd2dc-59a9-4980-ae46-e76f14c922bd" />
 </Solution>

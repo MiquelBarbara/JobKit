@@ -4,11 +4,10 @@
 #include <vector>
 #include <string>
 
-
-
 namespace JobKit
 {
 
+// Data-only task types stay in the public header.
 // Explicit runtime arguments supported by this learning implementation.
 using Parameter = std::variant<int, float, std::string, bool>;
 

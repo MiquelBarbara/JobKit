@@ -10,6 +10,7 @@
 namespace JobKit
 {
 
+// Template definitions must remain visible to translation units using the queue.
 template <typename T>
 // Shared FIFO: the mutex protects queue access, not the data used by a task.
 class ThreadQueue
