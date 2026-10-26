@@ -7,6 +7,9 @@
 #include <optional>
 #include <stdexcept>
 
+namespace JobKit
+{
+
 template <typename T>
 // Shared FIFO: the mutex protects queue access, not the data used by a task.
 class ThreadQueue
@@ -55,3 +58,5 @@ private:
 	std::condition_variable _condition;
 	bool _closed = false;
 };
+
+} // namespace JobKit

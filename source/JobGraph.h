@@ -11,6 +11,9 @@
 #include "JobGroup.h"
 #include "ThreadPool.h"
 
+namespace JobKit
+{
+
 class JobGraph
 {
 private:
@@ -238,3 +241,5 @@ private:
 	JobGroup _completion;
 	std::vector<std::unique_ptr<JobNode>> _nodes;
 };
+
+} // namespace JobKit

@@ -45,7 +45,7 @@
 #endif
 
 #if JOBKIT_TEST_PUSH
-static bool testPush(ThreadPool& pool, std::mutex& outputMutex)
+static bool testPush(JobKit::ThreadPool& pool, std::mutex& outputMutex)
 {
     std::array<int, 100> visits{};
 
@@ -53,7 +53,7 @@ static bool testPush(ThreadPool& pool, std::mutex& outputMutex)
     {
         pool.push({
             // Each task owns its job index; referenced records remain alive through wait().
-            [&outputMutex, &visits, job](std::vector<Parameter> const&) {
+            [&outputMutex, &visits, job](std::vector<JobKit::Parameter> const&) {
                 {
                     std::lock_guard lock(outputMutex);
                     ++visits[job];
@@ -78,7 +78,7 @@ static bool testPush(ThreadPool& pool, std::mutex& outputMutex)
 #if JOBKIT_TEST_DISPATCH
 using Range = std::pair<std::size_t, std::size_t>;
 
-static bool testDispatchCase(ThreadPool& pool, std::mutex& outputMutex,
+static bool testDispatchCase(JobKit::ThreadPool& pool, std::mutex& outputMutex,
     std::size_t elementCount, std::size_t batchSize,
     const std::vector<Range>& expectedRanges)
 {
@@ -121,7 +121,7 @@ static bool testDispatchCase(ThreadPool& pool, std::mutex& outputMutex,
     return passed;
 }
 
-static bool testDispatch(ThreadPool& pool, std::mutex& outputMutex)
+static bool testDispatch(JobKit::ThreadPool& pool, std::mutex& outputMutex)
 {
     bool passed = true;
     // Repeated dispatch/wait calls also exercise reuse of the same pool.
@@ -138,17 +138,17 @@ static bool testDispatch(ThreadPool& pool, std::mutex& outputMutex)
 #endif
 
 #if JOBKIT_TEST_EXCEPTIONS
-static bool testExceptions(ThreadPool& pool)
+static bool testExceptions(JobKit::ThreadPool& pool)
 {
     bool otherTaskFinished = false;
     pool.push({
-        [](std::vector<Parameter> const&) {
+        [](std::vector<JobKit::Parameter> const&) {
             throw std::logic_error("Expected worker failure");
         },
         {}
     });
     pool.push({
-        [&otherTaskFinished](std::vector<Parameter> const&) {
+        [&otherTaskFinished](std::vector<JobKit::Parameter> const&) {
             otherTaskFinished = true;
         },
         {}
@@ -191,7 +191,7 @@ static bool testExceptions(ThreadPool& pool)
     // Keep captured locals alive through wait(), including its exception path.
     bool reusedTaskFinished = false;
     pool.push({
-        [&reusedTaskFinished](std::vector<Parameter> const&) {
+        [&reusedTaskFinished](std::vector<JobKit::Parameter> const&) {
             reusedTaskFinished = true;
         },
         {}
@@ -214,15 +214,15 @@ static bool testExceptions(ThreadPool& pool)
 #endif
 
 #if JOBKIT_TEST_GROUPS
-static bool testGroups(ThreadPool& pool, std::mutex& outputMutex)
+static bool testGroups(JobKit::ThreadPool& pool, std::mutex& outputMutex)
 {
     std::array<int, 12> visits{};
-    JobGroup group;
+    JobKit::JobGroup group;
 
     for (std::size_t job = 0; job < visits.size(); ++job)
     {
         pool.push({
-            [&outputMutex, &visits, job](std::vector<Parameter> const&) {
+            [&outputMutex, &visits, job](std::vector<JobKit::Parameter> const&) {
                 std::lock_guard lock(outputMutex);
                 ++visits[job];
                 std::cout << "Grouped task " << job << " on thread "
@@ -253,11 +253,11 @@ static bool testGroups(ThreadPool& pool, std::mutex& outputMutex)
 #endif
 
 #if JOBKIT_TEST_INDEPENDENT_GROUPS
-static bool testIndependentGroups(ThreadPool& pool, std::mutex& outputMutex)
+static bool testIndependentGroups(JobKit::ThreadPool& pool, std::mutex& outputMutex)
 {
     // This test needs at least two pool workers: B blocks one while A runs.
-    JobGroup groupA;
-    JobGroup groupB;
+    JobKit::JobGroup groupA;
+    JobKit::JobGroup groupB;
     std::array<int, 10> visits{};
     std::atomic<bool> bFinished{false};
     std::promise<void> bStarted;
@@ -266,7 +266,7 @@ static bool testIndependentGroups(ThreadPool& pool, std::mutex& outputMutex)
     auto bGate = releaseB.get_future().share();
 
     pool.push({
-        [&bStarted, &bFinished, bGate](std::vector<Parameter> const&) {
+        [&bStarted, &bFinished, bGate](std::vector<JobKit::Parameter> const&) {
             bStarted.set_value();
             bGate.wait(); // Only the calling thread can release this task.
             bFinished.store(true);
@@ -338,11 +338,11 @@ static bool testShutdown()
 
     // Destroy this pool on another thread so the caller can release blocked work.
     auto shutdown = std::async(std::launch::async, [&] {
-        ThreadPool pool{1};
+        JobKit::ThreadPool pool{1};
         for (std::size_t job = 0; job < visits.size(); ++job)
         {
             pool.push({
-                [&visits, gate, job](std::vector<Parameter> const&) {
+                [&visits, gate, job](std::vector<JobKit::Parameter> const&) {
                     gate.wait();
                     ++visits[job];
                 },
@@ -384,7 +384,7 @@ static bool testShutdown()
 
     // Empty queues must also wake and join their workers when closed.
     {
-        ThreadPool idlePool{2};
+        JobKit::ThreadPool idlePool{2};
     }
     std::cout << "[PASS] shutdown: an idle pool exits normally\n";
     return waitedForWork && drained;
@@ -395,7 +395,7 @@ static bool testShutdown()
 static bool testGraphValidation()
 {
     enum class Result { Accepted, Cycle, ExternalLink, UnexpectedError };
-    auto check = [](const JobGraph& graph, std::string_view name, Result expected) {
+    auto check = [](const JobKit::JobGraph& graph, std::string_view name, Result expected) {
         Result actual = Result::Accepted;
         try
         {
@@ -421,14 +421,14 @@ static bool testGraphValidation()
     };
 
     // Validation inspects links and counts; none of these operations are scheduled.
-    const Task noOp{[](std::vector<Parameter> const&) {}, {}};
+    const JobKit::Task noOp{[](std::vector<JobKit::Parameter> const&) {}, {}};
     bool passed = true;
     {
-        JobGraph graph;
+        JobKit::JobGraph graph;
         passed = check(graph, "empty graph accepted", Result::Accepted) && passed;
     }
     {
-        JobGraph graph;
+        JobKit::JobGraph graph;
         auto& a = graph.createJob(noOp);
         auto& b = graph.createJob(noOp);
         auto& c = graph.createJob(noOp);
@@ -439,7 +439,7 @@ static bool testGraphValidation()
         passed = check(graph, "repeat validation preserves counters", Result::Accepted) && passed;
     }
     {
-        JobGraph graph;
+        JobKit::JobGraph graph;
         auto& a = graph.createJob(noOp);
         auto& b = graph.createJob(noOp);
         auto& c = graph.createJob(noOp);
@@ -451,7 +451,7 @@ static bool testGraphValidation()
         passed = check(graph, "diamond accepted", Result::Accepted) && passed;
     }
     {
-        JobGraph graph;
+        JobKit::JobGraph graph;
         auto& a = graph.createJob(noOp);
         auto& b = graph.createJob(noOp);
         a.dependsOn(b);
@@ -461,8 +461,8 @@ static bool testGraphValidation()
     {
         // The same cross-graph link must be rejected from either end.
         // Keep both graphs alive while checking their stored node pointers.
-        JobGraph source;
-        JobGraph destination;
+        JobKit::JobGraph source;
+        JobKit::JobGraph destination;
         auto& prerequisite = source.createJob(noOp);
         auto& dependent = destination.createJob(noOp);
         dependent.dependsOn(prerequisite);
@@ -470,8 +470,8 @@ static bool testGraphValidation()
         passed = check(destination, "incoming external prerequisite rejected", Result::ExternalLink) && passed;
     }
     {
-        JobGraph graph;
-        JobGraph external;
+        JobKit::JobGraph graph;
+        JobKit::JobGraph external;
         auto& a = graph.createJob(noOp);
         auto& b = graph.createJob(noOp);
         auto& dependent = external.createJob(noOp);
@@ -487,7 +487,7 @@ static bool testGraphValidation()
 #endif
 
 #if JOBKIT_TEST_GRAPH_EXECUTION
-static bool testGraphExecution(ThreadPool& pool)
+static bool testGraphExecution(JobKit::ThreadPool& pool)
 {
     bool passed = true;
     auto report = [&passed](bool result, std::string_view name) {
@@ -499,7 +499,7 @@ static bool testGraphExecution(ThreadPool& pool)
         return std::all_of(visits.begin(), visits.end(),
             [](const std::atomic<int>& count) { return count.load() == 1; });
     };
-    auto waitSuccessfully = [](JobGraph& graph) {
+    auto waitSuccessfully = [](JobKit::JobGraph& graph) {
         try
         {
             graph.wait();
@@ -512,29 +512,29 @@ static bool testGraphExecution(ThreadPool& pool)
     };
 
     {
-        JobGraph graph;
+        JobKit::JobGraph graph;
         graph.submit(pool);
         report(waitSuccessfully(graph), "empty graph completes");
     }
     {
         std::array<std::atomic<int>, 3> visits{};
         std::atomic<bool> ordered{true};
-        JobGroup leafGroup;
+        JobKit::JobGroup leafGroup;
         std::promise<void> releaseRoot;
         auto rootGate = releaseRoot.get_future().share();
-        JobGraph graph;
+        JobKit::JobGraph graph;
         auto& a = graph.createJob({
-            [&visits, rootGate](std::vector<Parameter> const&) {
+            [&visits, rootGate](std::vector<JobKit::Parameter> const&) {
                 rootGate.wait();
                 ++visits[0];
             }, {}});
         auto& b = graph.createJob({
-            [&](std::vector<Parameter> const&) {
+            [&](std::vector<JobKit::Parameter> const&) {
                 if (visits[0].load() != 1) ordered.store(false);
                 ++visits[1];
             }, {}});
         auto& c = graph.createJob({
-            [&](std::vector<Parameter> const&) {
+            [&](std::vector<JobKit::Parameter> const&) {
                 if (visits[1].load() != 1) ordered.store(false);
                 ++visits[2];
             }, {}, &leafGroup});
@@ -569,25 +569,25 @@ static bool testGraphExecution(ThreadPool& pool)
         auto cStartedFuture = cStarted.get_future();
         std::promise<void> releaseBranches;
         auto branchGate = releaseBranches.get_future().share();
-        JobGraph graph;
+        JobKit::JobGraph graph;
         auto& a = graph.createJob({
-            [&](std::vector<Parameter> const&) { ++visits[0]; }, {}});
+            [&](std::vector<JobKit::Parameter> const&) { ++visits[0]; }, {}});
         auto& b = graph.createJob({
-            [&, branchGate](std::vector<Parameter> const&) {
+            [&, branchGate](std::vector<JobKit::Parameter> const&) {
                 if (visits[0].load() != 1) ordered.store(false);
                 bStarted.set_value();
                 branchGate.wait();
                 ++visits[1];
             }, {}});
         auto& c = graph.createJob({
-            [&, branchGate](std::vector<Parameter> const&) {
+            [&, branchGate](std::vector<JobKit::Parameter> const&) {
                 if (visits[0].load() != 1) ordered.store(false);
                 cStarted.set_value();
                 branchGate.wait();
                 ++visits[2];
             }, {}});
         auto& d = graph.createJob({
-            [&](std::vector<Parameter> const&) {
+            [&](std::vector<JobKit::Parameter> const&) {
                 if (visits[1].load() != 1 || visits[2].load() != 1)
                     ordered.store(false);
                 ++visits[3];
@@ -613,21 +613,21 @@ static bool testGraphExecution(ThreadPool& pool)
     {
         std::array<std::atomic<int>, 5> visits{};
         std::atomic<bool> ordered{true};
-        JobGroup failedBranch;
-        JobGraph graph;
+        JobKit::JobGroup failedBranch;
+        JobKit::JobGraph graph;
         auto& a = graph.createJob({
-            [&](std::vector<Parameter> const&) {
+            [&](std::vector<JobKit::Parameter> const&) {
                 ++visits[0];
                 throw std::logic_error("Expected graph failure");
             }, {}, &failedBranch});
         auto& b = graph.createJob({
-            [&](std::vector<Parameter> const&) { ++visits[1]; }, {}, &failedBranch});
+            [&](std::vector<JobKit::Parameter> const&) { ++visits[1]; }, {}, &failedBranch});
         auto& c = graph.createJob({
-            [&](std::vector<Parameter> const&) { ++visits[2]; }, {}, &failedBranch});
+            [&](std::vector<JobKit::Parameter> const&) { ++visits[2]; }, {}, &failedBranch});
         auto& independent = graph.createJob({
-            [&](std::vector<Parameter> const&) { ++visits[3]; }, {}});
+            [&](std::vector<JobKit::Parameter> const&) { ++visits[3]; }, {}});
         auto& independentChild = graph.createJob({
-            [&](std::vector<Parameter> const&) {
+            [&](std::vector<JobKit::Parameter> const&) {
                 if (visits[3].load() != 1) ordered.store(false);
                 ++visits[4];
             }, {}});
@@ -667,7 +667,7 @@ int main()
 {
     // Locals are destroyed in reverse order: the output mutex must outlive the pool.
     std::mutex outputMutex;
-    ThreadPool pool{4};
+    JobKit::ThreadPool pool{4};
     bool passed = true;
 
 #if JOBKIT_TEST_PUSH

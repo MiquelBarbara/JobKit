@@ -6,6 +6,11 @@
 #include <stdexcept>
 #include <utility>
 
+namespace JobKit
+{
+
+class JobGraph;
+
 enum class JobState
 {
 	Pending,
@@ -50,3 +55,5 @@ private:
 	std::atomic<std::size_t> prerequisiteCounter{ 0 };
 	std::vector<JobNode*> dependents;
 };
+
+} // namespace JobKit

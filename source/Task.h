@@ -6,10 +6,13 @@
 
 
 
+namespace JobKit
+{
+
 // Explicit runtime arguments supported by this learning implementation.
 using Parameter = std::variant<int, float, std::string, bool>;
 
-class JobGroup; // Forward declaration for friend declaration in Task.
+class JobGroup; // Declares the type used by Task's non-owning group pointer.
 
 struct Task
 {
@@ -21,3 +24,5 @@ struct Task
 
 	JobGroup* group = nullptr; // Optional: a task can belong to a JobGroup for wait() synchronization.
 };
+
+} // namespace JobKit

@@ -3,6 +3,12 @@
 #include <condition_variable>
 #include <exception>
 
+namespace JobKit
+{
+
+class ThreadPool;
+class JobGraph;
+
 class JobGroup
 {
 public:
@@ -53,3 +59,5 @@ private:
 
 	std::exception_ptr _exception;
 };
+
+} // namespace JobKit

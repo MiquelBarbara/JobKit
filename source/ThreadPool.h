@@ -14,6 +14,9 @@
 #include "JobGroup.h"
 #include "Task.h"
 
+namespace JobKit
+{
+
 // Use at least one worker. Task exceptions are caught and the first recorded failure
 // is rethrown by wait() after all work finishes. That wait() consumes the stored error.
 // Stop submitting before destroying the pool. Call wait() from outside its workers:
@@ -201,3 +204,5 @@ private:
 
 
 };
+
+} // namespace JobKit
