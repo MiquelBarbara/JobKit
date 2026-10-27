@@ -6,6 +6,90 @@ Use the ownership and shutdown rules below in any host application. Memory/race 
 
 ## Build and run
 
+### CMake library and independent example
+
+The standalone build requires CMake 3.21+, a C++20 compiler/standard library with
+`std::jthread`, and platform thread support. It builds only the static library;
+the example is a separate application project. There are no engine dependencies,
+downloads, playground targets or test targets in this build.
+
+From the JobKit repository root:
+
+```sh
+cmake -S . -B out/cmake -DCMAKE_BUILD_TYPE=Release
+cmake --build out/cmake --config Release
+```
+
+For a multi-configuration generator (Visual Studio or Ninja Multi-Config), select
+Debug/Release with `--config`; `CMAKE_BUILD_TYPE` applies to single-configuration
+generators such as Ninja and Unix Makefiles. On Windows, use a CMake version
+supporting your selected Visual Studio generator, or use Ninja in a Developer
+PowerShell. For example, current Visual Studio supports
+`-G "Visual Studio 18 2026" -A x64` with its bundled CMake.
+
+Consumers add the checkout as a subdirectory and link the namespaced target:
+
+```cmake
+add_subdirectory(external/JobKit)
+add_executable(MyApp main.cpp)
+target_link_libraries(MyApp PRIVATE JobKit::JobKit)
+```
+
+The target propagates its public include directory, C++20 requirement and
+`Threads::Threads` linkage. JobKit does not override the host's compiler flags,
+language extensions, position-independent-code policy or MSVC runtime choice.
+For an MSVC build, match platform, configuration and `CMAKE_MSVC_RUNTIME_LIBRARY`
+between the library and consumers. The CMake default uses the DLL runtime;
+select a static runtime consistently for both sides if your host requires it.
+
+To build the independent example directly from sources (run at the JobKit root):
+
+```sh
+cmake -S examples/basic -B out/example-source -DJOBKIT_SOURCE_DIR="$PWD" -DCMAKE_BUILD_TYPE=Release
+cmake --build out/example-source --config Release
+```
+
+Run `out/example-source/JobKitExample` on single-configuration Unix builds,
+`out/example-source/JobKitExample.exe` with Windows Ninja, or
+`out/example-source/Release/JobKitExample.exe` with Visual Studio. It prints
+`Sum of squares 1..256: 5625216`, using grouped dispatch followed by a typed future
+with a move-only capture/result. All waits occur on the controlling thread.
+
+For an installed package, standalone builds enable `JOBKIT_INSTALL` by default:
+
+```sh
+cmake --install out/cmake --config Release --prefix "$PWD/out/install"
+cmake -S examples/basic -B out/example-installed -DCMAKE_PREFIX_PATH="$PWD/out/install" -DCMAKE_BUILD_TYPE=Release
+cmake --build out/example-installed --config Release
+```
+
+The example uses `find_package(JobKit CONFIG REQUIRED)` when `JOBKIT_SOURCE_DIR`
+is empty. Another installed-package consumer needs just:
+
+```cmake
+find_package(JobKit CONFIG REQUIRED)
+target_link_libraries(MyApp PRIVATE JobKit::JobKit)
+```
+
+Packages export `JobKit::JobKit` and resolve their thread dependency without source
+checkout paths. Standard GNU installation directories can be customized through
+`CMAKE_INSTALL_INCLUDEDIR` and `CMAKE_INSTALL_LIBDIR`; `CMAKE_PREFIX_PATH` locates
+standard installation layouts. With a nonstandard library directory, set
+`JobKit_DIR` to `<prefix>/<library-directory>/cmake/JobKit` directly. Debug archives
+have a `d` suffix, allowing Debug and Release
+to be installed into the same prefix. Build and install each desired configuration
+before configuring a consumer. Match installed configurations and MSVC runtimes
+with the consumer; a Release-only archive is not a Debug-runtime substitute.
+For installed packages, RelWithDebInfo/MinSizeRel consumers use their matching
+archive if installed, otherwise Release. Explicit consumer configuration mappings
+are respected; optimized consumers never implicitly choose Debug as that default.
+
+When embedded with `add_subdirectory`/FetchContent, `JOBKIT_INSTALL` defaults to
+OFF so the dependency does not add install rules to the host unless requested.
+The example always builds separately, even if installation is enabled.
+
+### Visual Studio projects
+
 The supplied Visual Studio projects use the v145 toolset, a Windows SDK, and C++20. They define Debug and Release configurations for Win32 and x64.
 
 1. Open `JobKit.slnx` in a Visual Studio installation supporting these projects.
@@ -24,6 +108,8 @@ msbuild .\JobKit.slnx /m:1 /p:Configuration=Release /p:Platform=x64
 ```text
 include/JobKit/   Public headers
 source/          Library implementations
+cmake/           Installed-package configuration
+examples/basic/  Independent CMake consumer application
 playground/      Console test application
 out/             Build outputs and intermediate files
 ```
@@ -285,10 +371,21 @@ observation, 0.204--0.207 ms disabled and 0.205--0.207 ms enabled. These synthet
 results show why observation cost matters for tiny jobs; they do not establish
 an application-wide speedup or a zero-overhead disabled path.
 
+The standalone CMake path was built and its independent source/installed-package
+examples run manually in Debug and Release with MSVC 19.51 (Visual Studio x64,
+CMake 4.3.1) and Ubuntu GCC 13.3/libstdc++ (Unix Makefiles, CMake 3.31.10). Each
+printed `Sum of squares 1..256: 5625216`. Relocated packages, paths with spaces,
+custom GNU install directories, a Windows Ninja/static-Debug-runtime build, and
+an installed RelWithDebInfo consumer using the Release archive were exercised.
+The standalone build exposes only the library; embedding defaults installation
+off, and the example consumes C++20/includes/thread linkage from `JobKit::JobKit`.
+Other compilers, macOS, other architectures, and memory/race analysis remain
+unverified. This build milestone changes no scheduler implementation or APIs.
+
 ## Next milestones
 
 1. Measure application workloads and scheduling overhead before changing queue behavior or task storage.
-2. Provide a portable standalone build/consumption path and perform memory/race analysis where supported.
+2. Extend standalone CMake validation to other toolchains/platforms and perform memory/race analysis where supported.
 3. Explore cooperative cancellation, graph adoption/reuse, and optional diagnostics using generic application requirements.
 
 The current scheduler uses a shared FIFO task queue. Work stealing, priorities, cancellation, graph reuse, and performance tuning are future design choices rather than prerequisites for that first integration.

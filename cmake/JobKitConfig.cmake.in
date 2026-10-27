@@ -1,0 +1,21 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+include("${CMAKE_CURRENT_LIST_DIR}/JobKitTargets.cmake")
+
+# CMake otherwise picks the first installed configuration when no exact match
+# exists, which could select a Debug CRT archive for an optimized MSVC host.
+# Respect mappings supplied by the consumer; prefer an exact optimized archive.
+foreach(jobkit_config IN ITEMS RELWITHDEBINFO MINSIZEREL)
+    get_property(jobkit_has_mapping TARGET JobKit::JobKit
+        PROPERTY MAP_IMPORTED_CONFIG_${jobkit_config} SET)
+    if(NOT jobkit_has_mapping)
+        set_property(TARGET JobKit::JobKit PROPERTY MAP_IMPORTED_CONFIG_${jobkit_config}
+            "${jobkit_config};Release")
+    endif()
+endforeach()
+unset(jobkit_config)
+unset(jobkit_has_mapping)
+
+check_required_components(JobKit)

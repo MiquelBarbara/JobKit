@@ -1,0 +1,15 @@
+cmake_minimum_required(VERSION 3.21)
+project(JobKitExample LANGUAGES CXX)
+
+set(JOBKIT_SOURCE_DIR "" CACHE PATH "JobKit source checkout; leave empty to use an installed package")
+if(JOBKIT_SOURCE_DIR)
+    if(NOT EXISTS "${JOBKIT_SOURCE_DIR}/CMakeLists.txt")
+        message(FATAL_ERROR "JOBKIT_SOURCE_DIR must name a JobKit checkout containing CMakeLists.txt")
+    endif()
+    add_subdirectory("${JOBKIT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/JobKit")
+else()
+    find_package(JobKit CONFIG REQUIRED)
+endif()
+
+add_executable(JobKitExample main.cpp)
+target_link_libraries(JobKitExample PRIVATE JobKit::JobKit)
