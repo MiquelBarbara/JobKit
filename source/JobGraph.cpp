@@ -123,7 +123,7 @@ void JobGraph::executeNode(ThreadPool& pool, JobNode& node)
 
 	try
 	{
-		node.task.task(node.task.arguments);
+		node.task.task();
 	}
 	catch (...)
 	{
@@ -183,10 +183,9 @@ void JobGraph::scheduleNode(ThreadPool& pool, JobNode& node)
 	try
 	{
 		pool.push({
-			[this, &pool, &node](std::vector<Parameter> const&) {
+			[this, &pool, &node] {
 				executeNode(pool, node);
 			},
-			{},
 			nullptr
 			});
 

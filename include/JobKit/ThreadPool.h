@@ -8,6 +8,10 @@
 #include <mutex>
 #include <condition_variable>
 #include <exception>
+#include <future>
+#include <memory>
+#include <type_traits>
+#include <utility>
 
 namespace JobKit
 {
@@ -29,6 +33,18 @@ public:
 	~ThreadPool();
 
 	bool push(Task const& task);
+	// Captures own the input. Callable errors belong to the returned future, not wait().
+	// The shared packaged task lets move-only callables/results use the copyable queue.
+	template <class Function>
+	auto submit(Function&& function) -> std::future<std::invoke_result_t<std::decay_t<Function>&>>
+	{
+		using Result = std::invoke_result_t<std::decay_t<Function>&>;
+		auto task = std::make_shared<std::packaged_task<Result()>>(std::forward<Function>(function));
+		auto result = task->get_future();
+		push({[task] { (*task)(); }});
+		return result;
+	}
+
 	void dispatch(std::size_t elementCount, std::size_t batchSize, std::function<void(std::size_t, std::size_t)> operation, JobGroup* group = nullptr);
 	void wait();
 	static bool isWorkerThread() noexcept;

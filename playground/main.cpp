@@ -106,13 +106,13 @@ static bool testGraphValidationLifecycle(JobKit::ThreadPool& pool)
     auto rootGate = releaseRoot.get_future().share();
     JobKit::JobGraph graph;
     auto& root = graph.createJob({
-        [&, rootGate](std::vector<JobKit::Parameter> const&) {
+        [&, rootGate]() {
             started.set_value();
             rootGate.wait();
             ++visits[0];
-        }, {}});
+        }});
     auto& child = graph.createJob({
-        [&](std::vector<JobKit::Parameter> const&) { ++visits[1]; }, {}});
+        [&]() { ++visits[1]; }});
     child.dependsOn(root);
 
     bool validationAccepted = true;
@@ -124,7 +124,7 @@ static bool testGraphValidationLifecycle(JobKit::ThreadPool& pool)
     catch (...) { validationAccepted = false; }
     // Validation must also leave the graph open for further construction.
     graph.createJob({
-        [&](std::vector<JobKit::Parameter> const&) { ++visits[2]; }, {}});
+        [&]() { ++visits[2]; }});
     const bool before = report(validationAccepted
         && std::all_of(visits.begin(), visits.end(),
             [](const std::atomic<int>& count) { return count.load() == 0; }),
@@ -176,14 +176,14 @@ static bool testPendingGraphDestruction(JobKit::ThreadPool& pool)
     auto lifetime = std::async(std::launch::async, [&] {
         JobKit::JobGraph graph;
         auto& root = graph.createJob({
-            [&visits, rootGate](std::vector<JobKit::Parameter> const&) {
+            [&visits, rootGate]() {
                 rootGate.wait();
                 ++visits[0];
-            }, {}});
+            }});
         auto& child = graph.createJob({
-            [&](std::vector<JobKit::Parameter> const&) { ++visits[1]; }, {}});
+            [&]() { ++visits[1]; }});
         auto& grandchild = graph.createJob({
-            [&](std::vector<JobKit::Parameter> const&) { ++visits[2]; }, {}});
+            [&]() { ++visits[2]; }});
         child.dependsOn(root);
         grandchild.dependsOn(child);
         graph.submit(pool);
@@ -222,14 +222,14 @@ static bool testFailedGraphDestruction(JobKit::ThreadPool& pool)
     {
         JobKit::JobGraph graph;
         auto& failed = graph.createJob({
-            [&](std::vector<JobKit::Parameter> const&) {
+            [&]() {
                 ++visits[0];
                 throw std::logic_error("Expected failure during graph destruction");
-            }, {}});
+            }});
         auto& skipped = graph.createJob({
-            [&](std::vector<JobKit::Parameter> const&) { ++visits[1]; }, {}});
+            [&]() { ++visits[1]; }});
         graph.createJob({
-            [&](std::vector<JobKit::Parameter> const&) { ++visits[2]; }, {}});
+            [&]() { ++visits[2]; }});
         skipped.dependsOn(failed);
         graph.submit(pool);
         // Scope exit must wait, skip the dependent, and avoid rethrowing task errors.
@@ -254,7 +254,7 @@ static bool testUnsubmittedGraphDestruction()
     {
         JobKit::JobGraph graph;
         graph.createJob({
-            [&](std::vector<JobKit::Parameter> const&) { ++visits; }, {}});
+            [&]() { ++visits; }});
     }
     return report(visits.load() == 0, "unsubmitted graph destruction executes no work");
 }
@@ -263,9 +263,9 @@ static bool testExplicitWaitStillReportsErrors(JobKit::ThreadPool& pool)
 {
     JobKit::JobGraph graph;
     graph.createJob({
-        [](std::vector<JobKit::Parameter> const&) {
+        []() {
             throw std::logic_error("Expected explicit wait failure");
-        }, {}});
+        }});
     graph.submit(pool);
 
     bool originalError = false;
@@ -284,9 +284,9 @@ static bool testWorkerThreadDetection(JobKit::ThreadPool& pool)
     const bool callerIsNotWorker = !JobKit::ThreadPool::isWorkerThread();
     std::atomic<bool> workerDetected{false};
     pool.push({
-        [&](std::vector<JobKit::Parameter> const&) {
+        [&]() {
             workerDetected.store(JobKit::ThreadPool::isWorkerThread());
-        }, {}});
+        }});
     pool.wait();
     return report(callerIsNotWorker && workerDetected.load(),
         "worker marker distinguishes the caller from pool workers");
@@ -299,18 +299,18 @@ static int runWorkerDestructionChild()
 {
     JobKit::ThreadPool pool{1};
     auto graph = std::make_unique<JobKit::JobGraph>();
-    graph->createJob({[](std::vector<JobKit::Parameter> const&) {}, {}});
+    graph->createJob({[]() {}});
     graph->submit(pool);
     graph->wait();
     JobKit::JobGraph* ownedGraph = graph.release();
     pool.push({
-        [ownedGraph](std::vector<JobKit::Parameter> const&) {
+        [ownedGraph]() {
             if (!JobKit::ThreadPool::isWorkerThread()) std::_Exit(89);
             // Convert the intentional termination into an identifiable exit code.
             std::set_terminate([] { std::_Exit(expectedTerminateExit); });
             delete ownedGraph;
             std::_Exit(87); // The destructor incorrectly returned instead of terminating.
-        }, {}});
+        }});
     pool.wait();
     return 88;
 }
@@ -324,7 +324,7 @@ static int runWorkerWaitChild(std::string_view mode)
     JobKit::JobGraph graph;
     std::atomic<bool> rejected{false};
     std::atomic<bool> continued{false};
-    auto attemptWait = [&](std::vector<JobKit::Parameter> const&) {
+    auto attemptWait = [&]() {
         try
         {
             if (mode == poolWaitMode) pool.wait();
@@ -338,20 +338,20 @@ static int runWorkerWaitChild(std::string_view mode)
 
     if (mode == graphWaitMode)
     {
-        graph.createJob({attemptWait, {}});
+        graph.createJob({attemptWait});
         graph.submit(pool);
         graph.wait();
     }
     else
     {
-        pool.push({attemptWait, {}, mode == groupWaitMode ? &group : nullptr});
+        pool.push({attemptWait, mode == groupWaitMode ? &group : nullptr});
         if (mode == groupWaitMode) group.wait();
     }
     pool.wait();
 
     // Rejecting the wait must leave the worker available for subsequent work.
     pool.push({
-        [&](std::vector<JobKit::Parameter> const&) { continued.store(true); }, {}});
+        [&]() { continued.store(true); }});
     pool.wait();
     return rejected.load() && continued.load() ? 0 : 1;
 }
@@ -382,10 +382,10 @@ static int runFailurePropagationChild(bool wide, bool destroyWithoutWait)
     {
         JobKit::JobGraph graph;
         auto& root = graph.createJob({
-            [&](std::vector<JobKit::Parameter> const&) {
+            [&]() {
                 ++rootVisits;
                 throw std::runtime_error(std::string(completionError));
-            }, {}, &group});
+            }, &group});
         JobKit::JobNode* previous = &root;
         // A deep chain exposes recursive stack growth. A wide graph fills the
         // pending worklist while processing the failed root's dependents.
@@ -393,12 +393,12 @@ static int runFailurePropagationChild(bool wide, bool destroyWithoutWait)
         for (std::size_t i = 0; i < descendantCount; ++i)
         {
             auto& child = graph.createJob({
-                [&](std::vector<JobKit::Parameter> const&) { ++skippedVisits; }, {}, &group});
+                [&]() { ++skippedVisits; }, &group});
             child.dependsOn(wide ? root : *previous);
             previous = &child;
         }
         graph.createJob({
-            [&](std::vector<JobKit::Parameter> const&) { ++independentVisits; }, {}, &group});
+            [&]() { ++independentVisits; }, &group});
         graph.submit(pool);
         if (!destroyWithoutWait)
         {
@@ -438,27 +438,27 @@ static int runConcurrentJoinChild(bool failRoot)
             for (std::size_t i = 0; i < workerCount; ++i)
             {
                 roots[i] = &graph.createJob({
-                    [&, i](std::vector<JobKit::Parameter> const&) {
+                    [&, i]() {
                         rootGate.arrive_and_wait();
                         ++rootVisits[i];
                         if (failRoot && i == 0)
                             throw std::runtime_error(std::string(completionError));
-                    }, {}, &group});
+                    }, &group});
             }
             auto& join = graph.createJob({
-                [&](std::vector<JobKit::Parameter> const&) {
+                [&]() {
                     for (std::size_t i = 0; i < workerCount; ++i)
                         if (rootVisits[i].load() != 1) prerequisitesFinished.store(false);
                     ++joinVisits;
-                }, {}, &group});
+                }, &group});
             for (std::size_t i = 0; i < workerCount; ++i) join.dependsOn(*roots[i]);
             auto& tail = graph.createJob({
-                [&](std::vector<JobKit::Parameter> const&) { ++tailVisits; }, {}, &group});
+                [&]() { ++tailVisits; }, &group});
             tail.dependsOn(join);
             auto& independent = graph.createJob({
-                [&](std::vector<JobKit::Parameter> const&) { ++independentVisits; }, {}, &group});
+                [&]() { ++independentVisits; }, &group});
             auto& independentTail = graph.createJob({
-                [&](std::vector<JobKit::Parameter> const&) { ++independentTailVisits; }, {}, &group});
+                [&]() { ++independentTailVisits; }, &group});
             independentTail.dependsOn(independent);
 
             graph.submit(pool);
@@ -485,7 +485,7 @@ static int runCompletionLifetimeChild()
         std::atomic<int> visits{0};
         auto graph = std::make_unique<JobKit::JobGraph>();
         graph->createJob({
-            [&](std::vector<JobKit::Parameter> const&) { ++visits; }, {}, &group});
+            [&]() { ++visits; }, &group});
         graph->submit(pool);
         group.wait();
         // The group can finish before the drainer exits. Destroy immediately:
@@ -514,13 +514,13 @@ static int runPendingGroupDestructionChild()
     auto lifetime = std::async(std::launch::async, [&] {
         JobKit::JobGroup group;
         pool.push({
-            [&, rootGate](std::vector<JobKit::Parameter> const&) {
+            [&, rootGate]() {
                 started.set_value();
                 rootGate.wait();
                 ++visits[0];
-            }, {}, &group});
+            }, &group});
         pool.push({
-            [&](std::vector<JobKit::Parameter> const&) { ++visits[1]; }, {}, &group});
+            [&]() { ++visits[1]; }, &group});
         submitted.set_value();
         // No group.wait(): scope exit must cover both running and queued work.
     });
@@ -550,12 +550,12 @@ static int runFailedGroupDestructionChild()
     {
         JobKit::JobGroup group;
         pool.push({
-            [&](std::vector<JobKit::Parameter> const&) {
+            [&]() {
                 ++visits;
                 throw std::runtime_error("Expected group destruction failure");
-            }, {}, &group});
+            }, &group});
         pool.push({
-            [&](std::vector<JobKit::Parameter> const&) { ++visits; }, {}, &group});
+            [&]() { ++visits; }, &group});
         // Destruction must wait for both tasks without reporting their errors.
     }
     const bool completedOnDestruction = visits.load() == 2;
@@ -568,7 +568,7 @@ static int runFailedGroupDestructionChild()
     catch (...) {}
     std::atomic<bool> continued{false};
     pool.push({
-        [&](std::vector<JobKit::Parameter> const&) { continued.store(true); }, {}});
+        [&]() { continued.store(true); }});
     pool.wait();
     return completedOnDestruction && originalPoolError && continued.load() ? 0 : 1;
 }
@@ -582,18 +582,18 @@ static int runCompletedWorkerGroupChild(bool previouslyUsed)
     if (previouslyUsed)
     {
         pool.push({
-            [&](std::vector<JobKit::Parameter> const&) { ++visits; }, {}, group.get()});
+            [&]() { ++visits; }, group.get()});
         group->wait();
         pool.wait();
     }
     JobKit::JobGroup* ownedGroup = group.release();
     std::atomic<bool> destroyedOnWorker{false};
     pool.push({
-        [&, ownedGroup](std::vector<JobKit::Parameter> const&) {
+        [&, ownedGroup]() {
             if (!JobKit::ThreadPool::isWorkerThread()) std::_Exit(89);
             delete ownedGroup;
             destroyedOnWorker.store(true);
-        }, {}}); // The deleting task does not belong to the group it destroys.
+        }}); // The deleting task does not belong to the group it destroys.
     pool.wait();
     return destroyedOnWorker.load() && visits.load() == (previouslyUsed ? 1 : 0) ? 0 : 1;
 }
@@ -603,13 +603,13 @@ static int runUnfinishedWorkerGroupChild()
     JobKit::ThreadPool pool{1};
     auto* group = new JobKit::JobGroup;
     pool.push({
-        [group](std::vector<JobKit::Parameter> const&) {
+        [group]() {
             if (!JobKit::ThreadPool::isWorkerThread()) std::_Exit(89);
             // This task itself keeps the group's unfinished count above zero.
             std::set_terminate([] { std::_Exit(expectedTerminateExit); });
             delete group;
             std::_Exit(87); // Fail without letting the pool access a deleted group.
-        }, {}, group});
+        }, group});
     pool.wait();
     return 88;
 }
@@ -643,7 +643,7 @@ public:
             throw ExpectedSubmissionFailure{_state};
         }
     }
-    void operator()(std::vector<JobKit::Parameter> const&) const
+    void operator()() const
     {
         ++_state->executions; // Execution itself never throws.
     }
@@ -658,7 +658,7 @@ static int runSubmissionFailureChild(bool grouped)
     SubmissionCopyState state;
     JobKit::ThreadPool pool{1};
     JobKit::JobGroup group;
-    JobKit::Task task{ThrowingCopyCallable{state}, {}, grouped ? &group : nullptr};
+    JobKit::Task task{ThrowingCopyCallable{state}, grouped ? &group : nullptr};
 
     // Arm only after constructing Task: the failure must happen inside push(),
     // when std::function copies its target into the queue's Task entry.

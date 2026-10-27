@@ -1,8 +1,8 @@
 # JobKit
 
-JobKit is a C++20 job system being developed for use in a game engine. It provides a fixed thread pool, batched work, completion groups, and dependency graphs.
+JobKit is a standalone C++20 job system. It provides a fixed thread pool, typed futures, batched work, completion groups, and dependency graphs without engine dependencies.
 
-The current implementation is ready for an initial engine integration with the ownership and shutdown rules below. The latest x64 Release verification passed all 26 playground checks. Debug coverage, memory/race analysis, and engine workload benchmarks remain to be done.
+Use the ownership and shutdown rules below in any host application. Memory/race analysis and application workload benchmarks remain separate validation work.
 
 ## Build and run
 
@@ -34,16 +34,41 @@ All library types belong to the `JobKit` namespace.
 
 | Type | Purpose |
 | --- | --- |
-| `ThreadPool` | Owns a fixed number of workers; provides `push()`, `dispatch()`, and `wait()`. Construction requires at least one worker. |
-| `Task` | Holds a callable, its argument vector, and an optional non-owning `JobGroup*`. |
+| `ThreadPool` | Owns a fixed number of workers; provides `push()`, `submit()`, `dispatch()`, and `wait()`. Construction requires at least one worker. |
+| `Task` | Holds a `std::function<void()>` and an optional non-owning `JobGroup*`. |
 | `JobGroup` | Tracks completion of a selected set of tasks independently of other pool work. |
 | `JobGraph` | Owns jobs, validates dependencies, and submits a graph once. |
 | `JobNode` | Represents a graph job. `child.dependsOn(parent)` makes the child wait for the parent. |
 | `ThreadQueue<T>` | Provides synchronized FIFO storage; closing it rejects pushes and lets consumers drain existing entries. |
 
-`Task::task` has the signature `void(std::vector<Parameter>)`. `Parameter` is a variant of `int`, `float`, `std::string`, and `bool`. Callables can also capture application data. The current task representation copies the argument vector when invoking a callable.
+`Task::task` has the signature `void()`. Supply input through captures of your own types. The former `Parameter` variant and argument vector have been removed; update existing task callbacks to take no arguments and capture their inputs instead. Direct tasks use copyable callable storage; `submit()` also accepts move-only callables.
 
 `push()` returns `true` when submission succeeds and throws if submission fails. A rejected task does not remain counted as unfinished work.
+
+## Typed results
+
+`submit(callable)` accepts a zero-argument callable and returns `std::future<Result>`, including `std::future<void>`. The callable is owned by a shared `std::packaged_task`, allowing move-only captures and results without changing the queue's copyable task storage.
+
+```cpp
+#include <JobKit/ThreadPool.h>
+#include <chrono>
+#include <memory>
+
+int main()
+{
+    JobKit::ThreadPool pool{2};
+    auto result = pool.submit([input = std::make_unique<int>(21)] {
+        return std::make_unique<int>(*input * 2);
+    });
+    // Hosts can poll with wait_for(std::chrono::seconds(0)) before publishing.
+    auto output = result.get();
+    return *output == 42 ? 0 : 1;
+}
+```
+
+Callable failures are stored only in the returned future and rethrown by `get()`; they are not also reported by `pool.wait()`. Submission failures throw from `submit()` before returning a future. Typed submissions do not accept a group. Use direct tasks or graphs for group/graph error reporting.
+
+Discarding this future does not cancel or wait for the task. Retain captured data until execution finishes, and consume the future when its result or error matters. `pool.wait()` and pool destruction still finish accepted typed submissions, including those whose futures were discarded. Never block on a future from a JobKit worker: standard futures do not implement JobKit's worker-wait guard.
 
 ## Batched work
 
@@ -94,15 +119,15 @@ int main()
     JobKit::JobGraph graph;
 
     auto& prepare = graph.createJob({
-        [&input](const std::vector<JobKit::Parameter>&) {
+        [&input]() {
             input = {1, 2, 3, 4};
-        }, {}});
+        }});
 
     auto& transform = graph.createJob({
-        [&input, &output](const std::vector<JobKit::Parameter>&) {
+        [&input, &output]() {
             for (std::size_t i = 0; i < input.size(); ++i)
                 output[i] = input[i] * 2;
-        }, {}});
+        }});
 
     transform.dependsOn(prepare);
     graph.validate(); // Optional: submit() also validates before execution.
@@ -184,12 +209,12 @@ Tests live in `playground/main.cpp`. All test switches default to `1`. Set a swi
 
 Potentially fatal or deadlocking cases run in isolated child processes with a timeout. That harness uses Windows APIs; those isolated checks are skipped on other platforms.
 
-The latest verification passed **26 reported checks in x64 Release**. That verification disabled whole-program optimization and debug-symbol generation. Default project build settings, Debug, Win32, other compilers/platforms, and memory/race analysis have not been verified in this work. Stress checks exercise selected interleavings; they are not proof that every possible race is absent.
+The callable/future API revision passed **26 reported checks in both x64 Debug and x64 Release**, using the normal project settings (including Release whole-program optimization and debug-symbol generation). A temporary console exercise also verified typed values, `void`, references, move-only captures/results, future exceptions, discarded futures, and accepted work draining during pool destruction. Win32, other compilers/platforms, and memory/race analysis remain unverified. Stress checks exercise selected interleavings; they are not proof that every possible race is absent.
 
 ## Next milestones
 
-1. Add focused shutdown-order regression coverage.
-2. Verify the normal Debug and Release build configurations and perform memory/race analysis where supported.
-3. Integrate one bounded CPU workload into the engine, compare its results with sequential execution, and measure scheduling overhead.
+1. Measure application workloads and scheduling overhead before changing queue behavior or task storage.
+2. Provide a portable standalone build/consumption path and perform memory/race analysis where supported.
+3. Explore cooperative cancellation, graph adoption/reuse, and optional diagnostics using generic application requirements.
 
-The current scheduler uses a shared FIFO task queue. Work stealing, priorities, cancellation, typed results, graph reuse, and performance tuning are future design choices rather than prerequisites for that first integration.
+The current scheduler uses a shared FIFO task queue. Work stealing, priorities, cancellation, graph reuse, and performance tuning are future design choices rather than prerequisites for that first integration.
