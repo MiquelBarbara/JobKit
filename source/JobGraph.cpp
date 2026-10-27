@@ -277,6 +277,10 @@ void JobGraph::wait()
 
 void JobGraph::validate() const
 {
+	if (_submitted)
+	{
+		throw std::logic_error("Cannot validate a JobGraph after submission");
+	} 
 	auto state = buildValidationState();
 	validateLinks(state.remaining);
 	validateAcyclic(state);

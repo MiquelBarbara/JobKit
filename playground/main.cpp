@@ -43,6 +43,10 @@
 #define JOBKIT_TEST_GRAPH_COMPLETIONS 1
 #endif
 
+#ifndef JOBKIT_TEST_GRAPH_VALIDATION_LIFECYCLE
+#define JOBKIT_TEST_GRAPH_VALIDATION_LIFECYCLE 1
+#endif
+
 static_assert(std::is_nothrow_destructible_v<JobKit::JobGraph>);
 
 static constexpr int expectedTerminateExit = 86;
@@ -62,6 +66,85 @@ static bool report(bool passed, std::string_view name)
     std::cout << "[" << (passed ? "PASS" : "FAIL") << "] " << name << '\n';
     return passed;
 }
+
+#if JOBKIT_TEST_GRAPH_VALIDATION_LIFECYCLE
+static bool rejectsValidationAfterSubmission(const JobKit::JobGraph& graph)
+{
+    try { graph.validate(); }
+    catch (const std::logic_error& error)
+    {
+        // Check the guard's message: invalid_argument also derives from
+        // logic_error, so a dependency-validation error must not pass this test.
+        return std::string_view(error.what()) == "Cannot validate a JobGraph after submission";
+    }
+    catch (...) {}
+    return false;
+}
+
+static bool testGraphValidationLifecycle(JobKit::ThreadPool& pool)
+{
+    std::array<std::atomic<int>, 3> visits{};
+    std::promise<void> started;
+    auto startedFuture = started.get_future();
+    std::promise<void> releaseRoot;
+    auto rootGate = releaseRoot.get_future().share();
+    JobKit::JobGraph graph;
+    auto& root = graph.createJob({
+        [&, rootGate](std::vector<JobKit::Parameter> const&) {
+            started.set_value();
+            rootGate.wait();
+            ++visits[0];
+        }, {}});
+    auto& child = graph.createJob({
+        [&](std::vector<JobKit::Parameter> const&) { ++visits[1]; }, {}});
+    child.dependsOn(root);
+
+    bool validationAccepted = true;
+    try
+    {
+        graph.validate();
+        graph.validate(); // Validation must leave prerequisite counts unchanged.
+    }
+    catch (...) { validationAccepted = false; }
+    // Validation must also leave the graph open for further construction.
+    graph.createJob({
+        [&](std::vector<JobKit::Parameter> const&) { ++visits[2]; }, {}});
+    const bool before = report(validationAccepted
+        && std::all_of(visits.begin(), visits.end(),
+            [](const std::atomic<int>& count) { return count.load() == 0; }),
+        "validation before submission is repeatable and still allows graph construction");
+
+    bool runningRejected = false;
+    try
+    {
+        graph.submit(pool);
+        const bool rootStarted = startedFuture.wait_for(std::chrono::seconds{5})
+            == std::future_status::ready;
+        runningRejected = rejectsValidationAfterSubmission(graph)
+            && rootStarted && visits[0].load() == 0 && visits[1].load() == 0;
+    }
+    catch (...)
+    {
+        // Release any accepted work before graph destruction during unwinding.
+        releaseRoot.set_value();
+        throw;
+    }
+    releaseRoot.set_value();
+    bool executionSucceeded = true;
+    try { graph.wait(); }
+    catch (...) { executionSucceeded = false; }
+    pool.wait();
+
+    const bool during = report(runningRejected,
+        "validation during blocked execution throws the lifecycle logic_error");
+    const bool after = report(rejectsValidationAfterSubmission(graph)
+        && executionSucceeded
+        && std::all_of(visits.begin(), visits.end(),
+            [](const std::atomic<int>& count) { return count.load() == 1; }),
+        "validation after completion is rejected and every job still ran exactly once");
+    return before && during && after;
+}
+#endif
 
 #if JOBKIT_TEST_GRAPH_DESTRUCTION
 static bool testPendingGraphDestruction(JobKit::ThreadPool& pool)
@@ -474,6 +557,9 @@ int main(int argc, char* argv[])
         passed = testFailedGraphDestruction(pool) && passed;
         passed = testUnsubmittedGraphDestruction() && passed;
         passed = testExplicitWaitStillReportsErrors(pool) && passed;
+#endif
+#if JOBKIT_TEST_GRAPH_VALIDATION_LIFECYCLE
+        passed = testGraphValidationLifecycle(pool) && passed;
 #endif
 #if JOBKIT_TEST_WORKER_DESTRUCTION_GUARD
         passed = testIsolatedChild(workerDestructionMode, expectedTerminateExit,
