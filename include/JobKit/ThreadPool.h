@@ -2,6 +2,7 @@
 #include "ThreadQueue.h"
 #include "Task.h"
 #include "TaskObserver.h"
+#include "Cancellation.h"
 #include <atomic>
 #include <functional>
 #include <thread>
@@ -51,6 +52,13 @@ public:
 		auto result = task->get_future();
 		push({[task] { (*task)(); }});
 		return result;
+	}
+
+	template <class Function>
+	auto submit(std::stop_token token, Function&& function)
+	    -> std::future<std::invoke_result_t<std::decay_t<Function>&, std::stop_token>>
+	{
+		return submit(cancellable(token, std::forward<Function>(function)));
 	}
 
 	void dispatch(std::size_t elementCount, std::size_t batchSize, std::function<void(std::size_t, std::size_t)> operation, JobGroup* group = nullptr);

@@ -18,6 +18,9 @@
     <ClInclude Include="include\JobKit\ThreadQueue.h">
       <Filter>Archivos de encabezado</Filter>
     </ClInclude>
+    <ClInclude Include="include\JobKit\Cancellation.h">
+      <Filter>Archivos de encabezado</Filter>
+    </ClInclude>
     <ClInclude Include="include\JobKit\ThreadPool.h">
       <Filter>Archivos de encabezado</Filter>
     </ClInclude>

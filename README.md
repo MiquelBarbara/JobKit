@@ -156,6 +156,83 @@ Callable failures are stored only in the returned future and rethrown by `get()`
 
 Discarding this future does not cancel or wait for the task. Retain captured data until execution finishes, and consume the future when its result or error matters. `pool.wait()` and pool destruction still finish accepted typed submissions, including those whose futures were discarded. Never block on a future from a JobKit worker: standard futures do not implement JobKit's worker-wait guard.
 
+## Cooperative cancellation
+
+JobKit uses C++20 `std::stop_source`/`std::stop_token`. A source requests a stop;
+tokens share the request state safely without borrowing the source's lifetime.
+Requests are thread-safe, idempotent and irreversible for that state. Construct a
+new source for a new operation. Destroying a source, future, group or graph does
+not request cancellation. No cancellation state or clock/flag polling is added
+to the existing one-argument `submit()` path.
+
+```cpp
+#include <JobKit/ThreadPool.h>
+#include <stop_token>
+
+JobKit::ThreadPool pool(2);
+std::stop_source source;
+auto result = pool.submit(source.get_token(), [](std::stop_token stop) {
+    unsigned total = 0;
+    for (unsigned i = 0; i < 1000000; ++i) {
+        if (i % 1024 == 0) JobKit::throwIfCancellationRequested(stop);
+        total += i;
+    }
+    return total;
+});
+source.request_stop(); // For example, a controlling-thread Cancel action.
+try {
+    auto value = result.get(); // Completion can win the race with cancellation.
+    (void)value;
+} catch (const JobKit::TaskCancelled&) {
+    // Expected cancellation, distinct from a callback failure.
+}
+pool.wait();
+```
+
+`submit(token, callable)` accepts a callable taking a stop token and otherwise
+has the same typed-future, move-only capture/result and reference-result behavior
+as `submit(callable)`. It checks the token before entering the callable and after
+a normal return. If either check observes a stop request, the future reports
+`TaskCancelled`; a returned value is destroyed rather than delivered. Running
+callbacks must check at safe checkpoints using `throwIfCancellationRequested`
+or `stop_requested()`. Arbitrary exceptions thrown by the callback retain their
+original error; cancellation does not replace them during unwinding.
+
+Cancellation does not interrupt threads, stop blocking I/O, remove queue entries,
+roll back side effects or provide a deadline. A pre-cancelled submission is still
+accepted and counted, and its future becomes ready only when a worker handles it.
+Its callback is skipped, and observation/completion bookkeeping still finishes.
+Submission failures throw immediately as before, even with a requested token.
+An empty token behaves as never cancelled. Discarded futures still drain at pool
+destruction; keep captured resources alive through completion. Worker-side future
+waits remain forbidden by contract (standard futures do not enforce this guard).
+
+`JobKit::cancellable(token, callable)` from `<JobKit/Cancellation.h>` provides the
+same checks as a zero-argument callable for direct tasks and graph jobs:
+
+```cpp
+#include <JobKit/JobGroup.h>
+
+JobKit::JobGroup group;
+pool.push({JobKit::cancellable(source.get_token(), [](std::stop_token stop) {
+    JobKit::throwIfCancellationRequested(stop);
+    // Work with application-owned inputs.
+}), &group}); // Keep group and captured inputs alive through completion.
+```
+
+For direct tasks, `TaskCancelled` uses the existing pool/group error channels.
+For graphs it fails that node through the existing graph error channel, skips
+dependent descendants and leaves unrelated branches runnable. No graph state or
+dependency lifetime rules change. For dispatch, capture the token in the range
+callback and check between batches/elements appropriate to the workload.
+
+A stop request can race the final check or an already completed future. Hosts
+must still check request identity/revision and cancellation on their publication
+thread before applying results. Sources do not own application data; polling a
+token does not make other data access safe. Standard stop callbacks, if used by
+the host, run synchronously during `request_stop()` and follow the standard
+library's lifetime/reentrancy rules.
+
 ## Batched work
 
 `dispatch(elementCount, batchSize, operation, group)` submits one task per batch. Each operation receives a half-open range `[begin, end)` and processes the elements in that range itself. The final batch may be smaller. An element count or batch size of zero submits no work.
@@ -382,10 +459,20 @@ off, and the example consumes C++20/includes/thread linkage from `JobKit::JobKit
 Other compilers, macOS, other architectures, and memory/race analysis remain
 unverified. This build milestone changes no scheduler implementation or APIs.
 
+Cooperative cancellation passed temporary manual console exercises with MSVC
+Debug/Release and an installed CMake/GCC 13.3 consumer on Ubuntu. Checks covered
+pre-cancelled queued entries, running checkpoints, post-return cancellation,
+move-only/void/reference results, rvalue token parameters, ordinary errors,
+source lifetime, graph descendant skipping, pool/group error channels,
+observation counts and discarded-future draining. Normal Debug/Release builds and
+all 26 existing playground checks passed. No test suite or target was added.
+
 ## Next milestones
 
 1. Measure application workloads and scheduling overhead before changing queue behavior or task storage.
 2. Extend standalone CMake validation to other toolchains/platforms and perform memory/race analysis where supported.
-3. Explore cooperative cancellation, graph adoption/reuse, and optional diagnostics using generic application requirements.
+3. Extend cooperative cancellation adoption, graph lifetime guidance/reuse, and optional diagnostics using generic application requirements.
 
-The current scheduler uses a shared FIFO task queue. Work stealing, priorities, cancellation, graph reuse, and performance tuning are future design choices rather than prerequisites for that first integration.
+The current scheduler uses a shared FIFO task queue. Work stealing, priorities,
+graph reuse, and performance tuning remain evidence-driven design choices.
+Cooperative cancellation leaves that queue and its completion rules unchanged.
