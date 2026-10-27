@@ -15,6 +15,7 @@ public:
 	friend class ThreadPool;
 	friend class JobGraph;
 
+	~JobGroup() noexcept;
 	void wait();
 
 private:

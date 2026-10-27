@@ -4,8 +4,23 @@
 
 namespace JobKit
 {
+	JobGroup::~JobGroup() noexcept
+	{
+		if (ThreadPool::isWorkerThread())
+		{
+			std::lock_guard<std::mutex> lock(_mutex);
+			if(_unfinishedCount > 0)
+			{
+				std::terminate();
+			}
+		}
+		else
+		{
+			waitUntilComplete();
+		}
+	}
 
-void JobGroup::wait()
+	void JobGroup::wait()
 {
 	if(ThreadPool::isWorkerThread())
 	{

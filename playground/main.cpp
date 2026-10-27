@@ -47,7 +47,12 @@
 #define JOBKIT_TEST_GRAPH_VALIDATION_LIFECYCLE 1
 #endif
 
+#ifndef JOBKIT_TEST_GROUP_DESTRUCTION
+#define JOBKIT_TEST_GROUP_DESTRUCTION 1
+#endif
+
 static_assert(std::is_nothrow_destructible_v<JobKit::JobGraph>);
+static_assert(std::is_nothrow_destructible_v<JobKit::JobGroup>);
 
 static constexpr int expectedTerminateExit = 86;
 static constexpr std::string_view workerDestructionMode = "--jobkit-worker-destruction-child";
@@ -60,6 +65,11 @@ static constexpr std::string_view wideCompletionMode = "--jobkit-wide-completion
 static constexpr std::string_view successfulJoinMode = "--jobkit-successful-join-child";
 static constexpr std::string_view failedJoinMode = "--jobkit-failed-join-child";
 static constexpr std::string_view completionLifetimeMode = "--jobkit-completion-lifetime-child";
+static constexpr std::string_view pendingGroupMode = "--jobkit-pending-group-child";
+static constexpr std::string_view failedGroupMode = "--jobkit-failed-group-child";
+static constexpr std::string_view emptyWorkerGroupMode = "--jobkit-empty-worker-group-child";
+static constexpr std::string_view completedWorkerGroupMode = "--jobkit-completed-worker-group-child";
+static constexpr std::string_view unfinishedWorkerGroupMode = "--jobkit-unfinished-worker-group-child";
 
 static bool report(bool passed, std::string_view name)
 {
@@ -482,7 +492,124 @@ static int runCompletionLifetimeChild()
 }
 #endif
 
-#if JOBKIT_TEST_WORKER_DESTRUCTION_GUARD || JOBKIT_TEST_WORKER_WAIT_GUARDS || JOBKIT_TEST_GRAPH_COMPLETIONS
+#if JOBKIT_TEST_GROUP_DESTRUCTION
+static int runPendingGroupDestructionChild()
+{
+    // Unexpected termination becomes a failing child exit without an OS dialog.
+    std::set_terminate([] { std::_Exit(expectedTerminateExit); });
+    JobKit::ThreadPool pool{1};
+    std::array<std::atomic<int>, 2> visits{};
+    std::promise<void> releaseRoot;
+    auto rootGate = releaseRoot.get_future().share();
+    std::promise<void> started;
+    auto startedFuture = started.get_future();
+    std::promise<void> submitted;
+    auto submittedFuture = submitted.get_future();
+    auto lifetime = std::async(std::launch::async, [&] {
+        JobKit::JobGroup group;
+        pool.push({
+            [&, rootGate](std::vector<JobKit::Parameter> const&) {
+                started.set_value();
+                rootGate.wait();
+                ++visits[0];
+            }, {}, &group});
+        pool.push({
+            [&](std::vector<JobKit::Parameter> const&) { ++visits[1]; }, {}, &group});
+        submitted.set_value();
+        // No group.wait(): scope exit must cover both running and queued work.
+    });
+
+    const bool submittedBoth = submittedFuture.wait_for(std::chrono::seconds{5})
+        == std::future_status::ready;
+    const bool rootStarted = startedFuture.wait_for(std::chrono::seconds{5})
+        == std::future_status::ready;
+    const bool stillWaiting = lifetime.wait_for(std::chrono::milliseconds{50})
+        == std::future_status::timeout;
+    const bool neitherFinished = visits[0].load() == 0 && visits[1].load() == 0;
+    releaseRoot.set_value(); // Always unblock before joining, even on failure.
+    bool destructionSucceeded = true;
+    try { lifetime.get(); }
+    catch (...) { destructionSucceeded = false; }
+    const bool completedOnDestruction = visits[0].load() == 1 && visits[1].load() == 1;
+    pool.wait(); // Group completion precedes the pool's final bookkeeping.
+    return submittedBoth && rootStarted && stillWaiting && neitherFinished
+        && destructionSucceeded && completedOnDestruction ? 0 : 1;
+}
+
+static int runFailedGroupDestructionChild()
+{
+    std::set_terminate([] { std::_Exit(expectedTerminateExit); });
+    JobKit::ThreadPool pool{2};
+    std::atomic<int> visits{0};
+    {
+        JobKit::JobGroup group;
+        pool.push({
+            [&](std::vector<JobKit::Parameter> const&) {
+                ++visits;
+                throw std::runtime_error("Expected group destruction failure");
+            }, {}, &group});
+        pool.push({
+            [&](std::vector<JobKit::Parameter> const&) { ++visits; }, {}, &group});
+        // Destruction must wait for both tasks without reporting their errors.
+    }
+    const bool completedOnDestruction = visits.load() == 2;
+    bool originalPoolError = false;
+    try { pool.wait(); }
+    catch (const std::runtime_error& error)
+    {
+        originalPoolError = std::string_view(error.what()) == "Expected group destruction failure";
+    }
+    catch (...) {}
+    std::atomic<bool> continued{false};
+    pool.push({
+        [&](std::vector<JobKit::Parameter> const&) { continued.store(true); }, {}});
+    pool.wait();
+    return completedOnDestruction && originalPoolError && continued.load() ? 0 : 1;
+}
+
+static int runCompletedWorkerGroupChild(bool previouslyUsed)
+{
+    std::set_terminate([] { std::_Exit(expectedTerminateExit); });
+    JobKit::ThreadPool pool{1};
+    auto group = std::make_unique<JobKit::JobGroup>();
+    std::atomic<int> visits{0};
+    if (previouslyUsed)
+    {
+        pool.push({
+            [&](std::vector<JobKit::Parameter> const&) { ++visits; }, {}, group.get()});
+        group->wait();
+        pool.wait();
+    }
+    JobKit::JobGroup* ownedGroup = group.release();
+    std::atomic<bool> destroyedOnWorker{false};
+    pool.push({
+        [&, ownedGroup](std::vector<JobKit::Parameter> const&) {
+            if (!JobKit::ThreadPool::isWorkerThread()) std::_Exit(89);
+            delete ownedGroup;
+            destroyedOnWorker.store(true);
+        }, {}}); // The deleting task does not belong to the group it destroys.
+    pool.wait();
+    return destroyedOnWorker.load() && visits.load() == (previouslyUsed ? 1 : 0) ? 0 : 1;
+}
+
+static int runUnfinishedWorkerGroupChild()
+{
+    JobKit::ThreadPool pool{1};
+    auto* group = new JobKit::JobGroup;
+    pool.push({
+        [group](std::vector<JobKit::Parameter> const&) {
+            if (!JobKit::ThreadPool::isWorkerThread()) std::_Exit(89);
+            // This task itself keeps the group's unfinished count above zero.
+            std::set_terminate([] { std::_Exit(expectedTerminateExit); });
+            delete group;
+            std::_Exit(87); // Fail without letting the pool access a deleted group.
+        }, {}, group});
+    pool.wait();
+    return 88;
+}
+#endif
+
+#if JOBKIT_TEST_WORKER_DESTRUCTION_GUARD || JOBKIT_TEST_WORKER_WAIT_GUARDS || JOBKIT_TEST_GRAPH_COMPLETIONS || JOBKIT_TEST_GROUP_DESTRUCTION
 static bool testIsolatedChild(std::string_view mode, unsigned long expectedExit,
     std::string_view name)
 {
@@ -532,6 +659,17 @@ int main(int argc, char* argv[])
             || std::string_view(argv[1]) == groupWaitMode
             || std::string_view(argv[1]) == graphWaitMode))
             return runWorkerWaitChild(argv[1]);
+#if JOBKIT_TEST_GROUP_DESTRUCTION
+        if (argc == 2)
+        {
+            const std::string_view mode = argv[1];
+            if (mode == pendingGroupMode) return runPendingGroupDestructionChild();
+            if (mode == failedGroupMode) return runFailedGroupDestructionChild();
+            if (mode == emptyWorkerGroupMode) return runCompletedWorkerGroupChild(false);
+            if (mode == completedWorkerGroupMode) return runCompletedWorkerGroupChild(true);
+            if (mode == unfinishedWorkerGroupMode) return runUnfinishedWorkerGroupChild();
+        }
+#endif
 #if JOBKIT_TEST_GRAPH_COMPLETIONS
         if (argc == 2)
         {
@@ -586,6 +724,18 @@ int main(int argc, char* argv[])
             "concurrent mixed prerequisites skip the join and tail; unrelated branch finishes") && passed;
         passed = testIsolatedChild(completionLifetimeMode, 0,
             "immediate graph destruction after grouped completion (1000 iterations)") && passed;
+#endif
+#if JOBKIT_TEST_GROUP_DESTRUCTION
+        passed = testIsolatedChild(pendingGroupMode, 0,
+            "group destruction waits for running and queued tasks without explicit wait") && passed;
+        passed = testIsolatedChild(failedGroupMode, 0,
+            "group destruction drains failed tasks without rethrowing; pool preserves the error") && passed;
+        passed = testIsolatedChild(emptyWorkerGroupMode, 0,
+            "worker can destroy an empty group") && passed;
+        passed = testIsolatedChild(completedWorkerGroupMode, 0,
+            "worker can destroy a previously used completed group") && passed;
+        passed = testIsolatedChild(unfinishedWorkerGroupMode, expectedTerminateExit,
+            "worker destruction of an unfinished group terminates in the isolated child") && passed;
 #endif
         std::cout << "All enabled tests finished: " << (passed ? "PASS" : "FAIL") << '\n';
         return passed ? 0 : 1;
