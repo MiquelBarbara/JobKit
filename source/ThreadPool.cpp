@@ -39,7 +39,7 @@ std::jthread ThreadPool::makeThreadHandler(ThreadQueue<Task>& queue)
 				std::exception_ptr taskError = nullptr;
 				try
 				{
-					elem.task(elem.arguments);
+					elem.task();
 				}
 				catch (...)
 				{
@@ -135,11 +135,10 @@ void ThreadPool::dispatch(std::size_t elementCount, std::size_t batchSize, std::
 		push({
 			// Own a copy of the operation and range; the loop may finish before execution.
 			// References captured inside operation still need to outlive the task.
-			[operation, i, end](std::vector<Parameter> const&) {
+			[operation, i, end] {
 				// The caller's operation loops over the elements in this range.
 				operation(i, end);
 			},
-			{},
 			group
 		});
 
