@@ -20,21 +20,27 @@ void ThreadPool::decreaseUnfinishedTasks()
 	}
 }
 
-std::jthread ThreadPool::makeThreadHandler(ThreadQueue<Task>& queue)
+std::jthread ThreadPool::makeThreadHandler(std::size_t workerIndex)
 {
 	return std::jthread{
 		// The queue and pool must outlive this worker's captured references/pointer.
-		[&queue, this] {
+		[this, workerIndex] {
 				_isWorkerThread = true;
 			while (true)
 			{
-				auto const entry = queue.pop();
+				auto const entry = _queue.pop();
 				if (!entry)
 				{
 					return;
 				}
 
-				const Task& elem = *entry;
+				const Task& elem = entry->task;
+				TaskTiming timing;
+				if (entry->observed)
+				{
+					timing = {workerIndex, elem.group, entry->queuedAt, JobClock::now(), {}};
+					_observer->onTaskStarted(timing);
+				}
 
 				std::exception_ptr taskError = nullptr;
 				try
@@ -44,7 +50,14 @@ std::jthread ThreadPool::makeThreadHandler(ThreadQueue<Task>& queue)
 				catch (...)
 				{
 					taskError = std::current_exception();
-
+				}
+				if (entry->observed)
+				{
+					timing.finishedAt = JobClock::now();
+					_observer->onTaskFinished(timing);
+				}
+				if (taskError)
+				{
 					std::unique_lock<std::mutex> lock(_exception_mutex);
 					if (!_exception)
 					{
@@ -63,7 +76,7 @@ std::jthread ThreadPool::makeThreadHandler(ThreadQueue<Task>& queue)
 	};
 }
 
-ThreadPool::ThreadPool(std::size_t numThreads)
+ThreadPool::ThreadPool(std::size_t numThreads, std::shared_ptr<TaskObserver> observer) : _observer(std::move(observer))
 {
 	if(numThreads == 0)
 	{
@@ -75,7 +88,7 @@ ThreadPool::ThreadPool(std::size_t numThreads)
 		// Create workers once; each worker repeatedly takes entries from the queue.
 		for (std::size_t i = 0; i < numThreads; i++)
 		{
-			_threads.push_back(makeThreadHandler(_queue));
+			_threads.push_back(makeThreadHandler(i));
 		}
 	}
 	catch (...) {
@@ -101,7 +114,9 @@ bool ThreadPool::push(Task const& task)
 
 	try
 	{
-		_queue.push(task);
+		const bool observed = _observer && _observerEnabled.load(std::memory_order_relaxed);
+		ScheduledTask entry{task, observed ? JobClock::now() : JobClock::time_point{}, observed};
+		_queue.push(std::move(entry));
 	}
 	catch (...)
 	{
@@ -176,6 +191,16 @@ void ThreadPool::wait()
 bool ThreadPool::isWorkerThread() noexcept
 {
 	return _isWorkerThread;
+}
+
+void ThreadPool::setObserverEnabled(bool enabled) noexcept
+{
+	_observerEnabled.store(enabled, std::memory_order_relaxed);
+}
+std::size_t ThreadPool::unfinishedTaskCount()
+{
+	std::lock_guard lock(_mutex);
+	return static_cast<std::size_t>(_unfinished_tasks);
 }
 
 } // namespace JobKit
