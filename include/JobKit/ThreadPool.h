@@ -32,8 +32,10 @@ public:
 	void dispatch(std::size_t elementCount, std::size_t batchSize,
 		std::function<void(std::size_t, std::size_t)> operation, JobGroup* group = nullptr);
 	void wait();
-
+	static bool isWorkerThread() noexcept;
 private:
+	static thread_local bool _isWorkerThread;
+
 	ThreadQueue<Task> _queue;
 	// Completion uses separate synchronization from the queue's "work available" wait.
 	std::condition_variable _condition;

@@ -95,8 +95,9 @@ std::vector<JobNode*> JobGraph::prepareSubmission()
 		{
 			roots.push_back(node.get());
 		}
-
 	}
+
+	_pendingCompletions.reserve(_nodes.size());
 
 	_submitted = true;
 	for (const auto& node : _nodes)
@@ -133,8 +134,75 @@ void JobGraph::executeNode(ThreadPool& pool, JobNode& node)
 	finishNode(pool, node, result, error);
 }
 
-void JobGraph::finishNode(ThreadPool& pool, JobNode& node, JobState result, std::exception_ptr error)
+void JobGraph::finishNode(ThreadPool& pool,JobNode& node,JobState result, std::exception_ptr error)
 {
+	{
+		std::lock_guard<std::mutex> lock(_completionMutex);
+
+		// Every caller adds its completion, even when a drainer exists.
+		_pendingCompletions.push_back({ &node, result, std::move(error) });
+
+		if (_drainingCompletions)
+		{
+			return; // lock_guard releases the mutex automatically.
+		}
+
+		// Keep the graph alive until this drainer finishes.
+		_completion.addTask();
+		_drainingCompletions = true;
+	}
+
+	while (true)
+	{
+		PendingCompletion completion{};
+
+		{
+			std::lock_guard<std::mutex> lock(_completionMutex);
+
+			if (_pendingCompletions.empty())
+			{
+				// Checking empty and giving up ownership must happen together.
+				_drainingCompletions = false;
+				break;
+			}
+
+			completion = std::move(_pendingCompletions.back());
+			_pendingCompletions.pop_back();
+		}
+
+		// The mutex is unlocked: processing may enqueue more completions.
+		processCompletion(pool, std::move(completion));
+	}
+
+	// Release the drainer's extra count. No graph access after this call.
+	_completion.finishTask();
+}
+
+void JobGraph::scheduleNode(ThreadPool& pool, JobNode& node)
+{
+	try
+	{
+		pool.push({
+			[this, &pool, &node](std::vector<Parameter> const&) {
+				executeNode(pool, node);
+			},
+			{},
+			nullptr
+			});
+
+	}
+	catch (...)
+	{
+		finishNode(pool, node, JobState::Failed, std::current_exception());
+	}
+}
+
+void JobGraph::processCompletion(ThreadPool& pool, PendingCompletion completion)
+{
+	JobNode& node = *completion.node;
+	JobState& result = completion.result;
+	std::exception_ptr& error = completion.error;
+
 	node.state.store(result);
 	for (const auto& dependent : node.dependents)
 	{
@@ -166,22 +234,20 @@ void JobGraph::finishNode(ThreadPool& pool, JobNode& node, JobState result, std:
 	_completion.finishTask(error);
 }
 
-void JobGraph::scheduleNode(ThreadPool& pool, JobNode& node)
+JobGraph::~JobGraph() noexcept
 {
-	try
+	if(!_submitted)
 	{
-		pool.push({
-			[this, &pool, &node](std::vector<Parameter> const&) {
-				executeNode(pool, node);
-			},
-			{},
-			nullptr
-			});
-
+		return;
 	}
-	catch (...)
+
+	if(ThreadPool::isWorkerThread())
 	{
-		finishNode(pool, node, JobState::Failed, std::current_exception());
+		std::terminate();
+	}
+	else 
+	{
+		_completion.waitUntilComplete();
 	}
 }
 

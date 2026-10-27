@@ -18,6 +18,7 @@ public:
 	void wait();
 
 private:
+	void waitUntilComplete();
 	void addTask();
 	void finishTask(std::exception_ptr exception = nullptr);
 

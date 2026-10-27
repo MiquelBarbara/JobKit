@@ -1,10 +1,17 @@
 #include <JobKit/JobGroup.h>
+#include <JobKit/ThreadPool.h>
+#include <stdexcept>
 
 namespace JobKit
 {
 
 void JobGroup::wait()
 {
+	if(ThreadPool::isWorkerThread())
+	{
+		throw std::logic_error("JobGroup::wait() must not be called from a worker thread");
+	}
+
 	std::unique_lock<std::mutex> lock(_mutex);
 	_condition.wait(lock, [this] { return _unfinishedCount == 0; });
 
@@ -18,6 +25,12 @@ void JobGroup::wait()
 	{
 		std::rethrow_exception(exception_copy);
 	}
+}
+
+void JobGroup::waitUntilComplete()
+{
+	std::unique_lock<std::mutex> lock(_mutex);
+	_condition.wait(lock, [this] { return _unfinishedCount == 0; });
 }
 
 void JobGroup::addTask()

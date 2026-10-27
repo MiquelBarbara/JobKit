@@ -6,6 +6,8 @@
 namespace JobKit
 {
 
+thread_local bool ThreadPool::_isWorkerThread = false;
+
 void ThreadPool::decreaseUnfinishedTasks()
 {
 	// Use the same mutex as push() and wait() for every access to the counter.
@@ -23,6 +25,7 @@ std::jthread ThreadPool::makeThreadHandler(ThreadQueue<Task>& queue)
 	return std::jthread{
 		// The queue and pool must outlive this worker's captured references/pointer.
 		[&queue, this] {
+				_isWorkerThread = true;
 			while (true)
 			{
 				auto const entry = queue.pop();
@@ -146,6 +149,11 @@ void ThreadPool::dispatch(std::size_t elementCount, std::size_t batchSize, std::
 
 void ThreadPool::wait()
 {
+	if(isWorkerThread())
+	{
+		throw std::logic_error("ThreadPool::wait() must not be called from a worker thread");
+	}
+
 	// An empty queue is not enough: removed tasks may still be executing.
 	// With submissions paused, zero unfinished entries means all work has finished.
 	std::unique_lock<std::mutex> lock(_mutex);
@@ -164,6 +172,11 @@ void ThreadPool::wait()
 	{
 		std::rethrow_exception(exception_copy);
 	}
+}
+
+bool ThreadPool::isWorkerThread() noexcept
+{
+	return _isWorkerThread;
 }
 
 } // namespace JobKit
