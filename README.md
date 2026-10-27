@@ -193,6 +193,65 @@ The pool destructor closes its queue immediately. Destroying the pool with an un
 
 The pool currently exposes no separate public stop-accepting or shutdown operation; the engine must control producers and object lifetimes explicitly.
 
+## Optional scheduling observation
+
+Construct a pool with a `std::shared_ptr<TaskObserver>` to receive paired worker
+start/finish callbacks. Without an observer there are no timing clock reads or
+callbacks. `setObserverEnabled(false)` skips timing and callbacks for subsequent
+submissions, while entries already marked for observation finish their hook pair.
+There is still a queued timing envelope and a flag check; disabled instrumentation
+is not a zero-cost guarantee. Observation is enabled initially when supplied.
+
+`TaskTiming` contains a pool-local worker index, the optional non-owning group
+pointer, and steady-clock enqueue/start/finish timestamps. Enqueue time is captured
+after copying the callable and before queue insertion. Execution includes the start
+hook, but excludes the finish hook and completion bookkeeping. Typed future errors
+are still delivered only by their futures; hooks also run for failed tasks and graph
+wrappers. A queued graph wrapper can do graph completion/descendant submission work,
+so its measured duration is not necessarily only one user node callback.
+
+Hooks run concurrently on workers, outside scheduler locks, before group/pool
+completion. They must be short and non-throwing, and must not submit, wait for or
+destroy scheduler objects. Never retain/dereference the supplied group pointer
+after its callback. The pool owns its observer through worker join; an observer
+must not own its pool (which would form a cycle). Existing worker-wait and graph
+lifetime rules also apply when observation is enabled.
+
+The optional reusable collector has no engine dependency:
+
+```cpp
+#include <JobKit/MetricsObserver.h>
+#include <JobKit/ThreadPool.h>
+
+auto metrics = std::make_shared<JobKit::MetricsObserver>(4);
+JobKit::ThreadPool pool(4, metrics); // One collector per pool, matching worker count.
+metrics->sample();                 // Discard the initial interval if desired.
+pool.dispatch(1000, 64, [](std::size_t begin, std::size_t end) {
+    for (auto i = begin; i < end; ++i) { /* independent work */ }
+});
+pool.wait();
+auto interval = metrics->sample(); // One controlling-thread consumer.
+auto unfinished = pool.unfinishedTaskCount(); // Queued + executing; not an idle barrier.
+```
+
+Each `WorkerMetrics` provides completed-task count, summed and maximum queue wait
+and execution durations, busy/available worker time, and a live active flag.
+`sample()` consumes interval counts/sums/maxima, using a short lock per worker.
+Workers update independent, cache-line-aligned state rather than a shared global
+accumulator. Busy time includes partial tasks across samples, from registration in
+the start hook to registration in the finish hook; queue/execution durations and
+counts are attributed to the completion interval. Mean wait/run is summed duration
+divided by completed count; utilization is summed busy divided by summed capacity.
+Do not average per-worker percentages or treat parallel duration sums as frame time.
+
+Sampling workers and the outstanding gauge is not atomic across the pool. A brief
+queue spike between samples can be missed. Jobs accepted while observation is off
+remain unmeasured, including when observation is later re-enabled. To start a fresh
+display interval, discard one `sample()` on re-enable; already observed running
+jobs still contribute subsequent partial busy time and eventually their full
+completion durations. Avoid changing scheduler policy until application captures
+and observer overhead have been measured.
+
 ## Tests and verification status
 
 Tests live in `playground/main.cpp`. All test switches default to `1`. Set a switch to `0` in the file, or define it in the playground's preprocessor settings, then rebuild to disable that category.
@@ -210,6 +269,21 @@ Tests live in `playground/main.cpp`. All test switches default to `1`. Set a swi
 Potentially fatal or deadlocking cases run in isolated child processes with a timeout. That harness uses Windows APIs; those isolated checks are skipped on other platforms.
 
 The callable/future API revision passed **26 reported checks in both x64 Debug and x64 Release**, using the normal project settings (including Release whole-program optimization and debug-symbol generation). A temporary console exercise also verified typed values, `void`, references, move-only captures/results, future exceptions, discarded futures, and accepted work draining during pool destruction. Win32, other compilers/platforms, and memory/race analysis remain unverified. Stress checks exercise selected interleavings; they are not proof that every possible race is absent.
+
+The scheduling-observation revision also passed the normal Debug/Release x64
+builds and all 26 existing playground checks. A temporary console exercise
+verified partial busy intervals, queued/executing gauges, toggling with pending
+work, dispatch counts, direct/group/future/graph failures, skipped descendants,
+and observed work draining during destruction. No additional test suite/target
+was introduced.
+
+Three Release measurements of 20,000 empty dispatch batches on four workers
+produced median round times of 5.80--6.29 ms without an observer, 5.91--6.01 ms
+with its observer disabled, and 6.83--7.38 ms enabled. For 32 independent CPU
+tasks of roughly 25 microseconds each, medians were 0.203--0.207 ms without
+observation, 0.204--0.207 ms disabled and 0.205--0.207 ms enabled. These synthetic
+results show why observation cost matters for tiny jobs; they do not establish
+an application-wide speedup or a zero-overhead disabled path.
 
 ## Next milestones
 

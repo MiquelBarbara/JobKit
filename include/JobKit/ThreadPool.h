@@ -1,6 +1,8 @@
 #pragma once
 #include "ThreadQueue.h"
 #include "Task.h"
+#include "TaskObserver.h"
+#include <atomic>
 #include <functional>
 #include <thread>
 #include <vector>
@@ -25,11 +27,17 @@ class JobGroup;
 class ThreadPool
 {
 private:
+	struct ScheduledTask
+	{
+		Task task;
+		JobClock::time_point queuedAt{};
+		bool observed = false;
+	};
 	void decreaseUnfinishedTasks();
-	std::jthread makeThreadHandler(ThreadQueue<Task>& queue);
+	std::jthread makeThreadHandler(std::size_t workerIndex);
 
 public:
-	ThreadPool(std::size_t numThreads);
+	ThreadPool(std::size_t numThreads, std::shared_ptr<TaskObserver> observer = {});
 	~ThreadPool();
 
 	bool push(Task const& task);
@@ -48,10 +56,16 @@ public:
 	void dispatch(std::size_t elementCount, std::size_t batchSize, std::function<void(std::size_t, std::size_t)> operation, JobGroup* group = nullptr);
 	void wait();
 	static bool isWorkerThread() noexcept;
+	// Applies to new submissions. Already observed tasks finish their hook pair.
+	void setObserverEnabled(bool enabled) noexcept;
+	// Queued plus executing entries; a live gauge, not a stable idle barrier.
+	std::size_t unfinishedTaskCount();
 private:
 	static thread_local bool _isWorkerThread;
 
-	ThreadQueue<Task> _queue;
+	std::shared_ptr<TaskObserver> _observer;
+	std::atomic<bool> _observerEnabled{true};
+	ThreadQueue<ScheduledTask> _queue;
 	// Completion uses separate synchronization from the queue's "work available" wait.
 	std::condition_variable _condition;
 	std::mutex _mutex;

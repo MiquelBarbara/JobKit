@@ -18,17 +18,27 @@ class ThreadQueue
 public:
 	void push(T const& task) 
 	{
+		pushEntry(task);
+	}
+	void push(T&& task)
+	{
+		pushEntry(std::move(task));
+	}
+private:
+	template <class Entry> void pushEntry(Entry&& task)
+	{
 		std::lock_guard<std::mutex> lock(_mutex);
 		if(_closed)
 		{
 			throw std::runtime_error("Cannot push to a closed queue");
 		}
-		_queue.push(task);
+		_queue.push(std::forward<Entry>(task));
 		// Publish the entry before waking one consumer. Notification under the lock
 		// is valid; the consumer must reacquire the mutex before taking the entry.
 		_condition.notify_one();
 	}
 
+public:
 	std::optional<T> pop()
 	{
 		std::unique_lock<std::mutex> lock(_mutex);

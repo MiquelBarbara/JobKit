@@ -33,6 +33,12 @@
     <ClInclude Include="include\JobKit\JobGraph.h">
       <Filter>Archivos de encabezado</Filter>
     </ClInclude>
+    <ClInclude Include="include\JobKit\TaskObserver.h">
+      <Filter>Archivos de encabezado</Filter>
+    </ClInclude>
+    <ClInclude Include="include\JobKit\MetricsObserver.h">
+      <Filter>Archivos de encabezado</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="source\JobGraph.cpp">
@@ -45,6 +51,9 @@
       <Filter>Archivos de origen</Filter>
     </ClCompile>
     <ClCompile Include="source\ThreadPool.cpp">
+      <Filter>Archivos de origen</Filter>
+    </ClCompile>
+    <ClCompile Include="source\MetricsObserver.cpp">
       <Filter>Archivos de origen</Filter>
     </ClCompile>
   </ItemGroup>

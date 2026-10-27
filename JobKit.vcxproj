@@ -121,6 +121,8 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="include\JobKit\JobGraph.h" />
+    <ClInclude Include="include\JobKit\TaskObserver.h" />
+    <ClInclude Include="include\JobKit\MetricsObserver.h" />
     <ClInclude Include="include\JobKit\JobGroup.h" />
     <ClInclude Include="include\JobKit\JobNode.h" />
     <ClInclude Include="include\JobKit\Task.h" />
@@ -129,6 +131,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="source\JobGraph.cpp" />
+    <ClCompile Include="source\MetricsObserver.cpp" />
     <ClCompile Include="source\JobGroup.cpp" />
     <ClCompile Include="source\JobNode.cpp" />
     <ClCompile Include="source\ThreadPool.cpp" />
