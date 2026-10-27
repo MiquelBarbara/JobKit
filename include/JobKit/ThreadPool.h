@@ -29,8 +29,7 @@ public:
 	~ThreadPool();
 
 	bool push(Task const& task);
-	void dispatch(std::size_t elementCount, std::size_t batchSize,
-		std::function<void(std::size_t, std::size_t)> operation, JobGroup* group = nullptr);
+	void dispatch(std::size_t elementCount, std::size_t batchSize, std::function<void(std::size_t, std::size_t)> operation, JobGroup* group = nullptr);
 	void wait();
 	static bool isWorkerThread() noexcept;
 private:

@@ -51,6 +51,10 @@
 #define JOBKIT_TEST_GROUP_DESTRUCTION 1
 #endif
 
+#ifndef JOBKIT_TEST_SUBMISSION_FAILURE
+#define JOBKIT_TEST_SUBMISSION_FAILURE 1
+#endif
+
 static_assert(std::is_nothrow_destructible_v<JobKit::JobGraph>);
 static_assert(std::is_nothrow_destructible_v<JobKit::JobGroup>);
 
@@ -70,6 +74,8 @@ static constexpr std::string_view failedGroupMode = "--jobkit-failed-group-child
 static constexpr std::string_view emptyWorkerGroupMode = "--jobkit-empty-worker-group-child";
 static constexpr std::string_view completedWorkerGroupMode = "--jobkit-completed-worker-group-child";
 static constexpr std::string_view unfinishedWorkerGroupMode = "--jobkit-unfinished-worker-group-child";
+static constexpr std::string_view groupedSubmissionFailureMode = "--jobkit-grouped-submission-failure-child";
+static constexpr std::string_view ungroupedSubmissionFailureMode = "--jobkit-ungrouped-submission-failure-child";
 
 static bool report(bool passed, std::string_view name)
 {
@@ -609,7 +615,82 @@ static int runUnfinishedWorkerGroupChild()
 }
 #endif
 
-#if JOBKIT_TEST_WORKER_DESTRUCTION_GUARD || JOBKIT_TEST_WORKER_WAIT_GUARDS || JOBKIT_TEST_GRAPH_COMPLETIONS || JOBKIT_TEST_GROUP_DESTRUCTION
+#if JOBKIT_TEST_SUBMISSION_FAILURE
+struct SubmissionCopyState
+{
+    bool throwOnCopy = false;
+    int failedCopies = 0;
+    std::atomic<int> executions{0};
+};
+
+struct ExpectedSubmissionFailure final : std::exception
+{
+    explicit ExpectedSubmissionFailure(const SubmissionCopyState* source) : source(source) {}
+    const char* what() const noexcept override { return "Expected task copy failure"; }
+    const SubmissionCopyState* source;
+};
+
+class ThrowingCopyCallable
+{
+public:
+    explicit ThrowingCopyCallable(SubmissionCopyState& state) : _state(&state) {}
+    ThrowingCopyCallable(ThrowingCopyCallable&&) noexcept = default;
+    ThrowingCopyCallable(const ThrowingCopyCallable& other) : _state(other._state)
+    {
+        if (_state->throwOnCopy)
+        {
+            ++_state->failedCopies;
+            throw ExpectedSubmissionFailure{_state};
+        }
+    }
+    void operator()(std::vector<JobKit::Parameter> const&) const
+    {
+        ++_state->executions; // Execution itself never throws.
+    }
+
+private:
+    SubmissionCopyState* _state;
+};
+
+static int runSubmissionFailureChild(bool grouped)
+{
+    std::set_terminate([] { std::_Exit(expectedTerminateExit); });
+    SubmissionCopyState state;
+    JobKit::ThreadPool pool{1};
+    JobKit::JobGroup group;
+    JobKit::Task task{ThrowingCopyCallable{state}, {}, grouped ? &group : nullptr};
+
+    // Arm only after constructing Task: the failure must happen inside push(),
+    // when std::function copies its target into the queue's Task entry.
+    state.throwOnCopy = true;
+    bool originalException = false;
+    try { pool.push(task); }
+    catch (const ExpectedSubmissionFailure& error)
+    {
+        originalException = error.source == &state;
+    }
+    catch (...) {}
+    state.throwOnCopy = false;
+
+    auto waitSucceeds = [](auto& target) {
+        try { target.wait(); return true; }
+        catch (...) { return false; }
+    };
+    // A leaked group or pool count deadlocks here; the parent bounds the child.
+    bool passed = originalException && state.failedCopies == 1;
+    passed = waitSucceeds(group) && passed;
+    passed = waitSucceeds(pool) && passed;
+    passed = state.executions.load() == 0 && passed;
+
+    // Reuse the same Task, pool, and group after disabling the injected failure.
+    const bool accepted = pool.push(task);
+    passed = waitSucceeds(group) && passed;
+    passed = waitSucceeds(pool) && passed;
+    return passed && accepted && state.executions.load() == 1 ? 0 : 1;
+}
+#endif
+
+#if JOBKIT_TEST_WORKER_DESTRUCTION_GUARD || JOBKIT_TEST_WORKER_WAIT_GUARDS || JOBKIT_TEST_GRAPH_COMPLETIONS || JOBKIT_TEST_GROUP_DESTRUCTION || JOBKIT_TEST_SUBMISSION_FAILURE
 static bool testIsolatedChild(std::string_view mode, unsigned long expectedExit,
     std::string_view name)
 {
@@ -659,6 +740,14 @@ int main(int argc, char* argv[])
             || std::string_view(argv[1]) == groupWaitMode
             || std::string_view(argv[1]) == graphWaitMode))
             return runWorkerWaitChild(argv[1]);
+#if JOBKIT_TEST_SUBMISSION_FAILURE
+        if (argc == 2)
+        {
+            const std::string_view mode = argv[1];
+            if (mode == groupedSubmissionFailureMode) return runSubmissionFailureChild(true);
+            if (mode == ungroupedSubmissionFailureMode) return runSubmissionFailureChild(false);
+        }
+#endif
 #if JOBKIT_TEST_GROUP_DESTRUCTION
         if (argc == 2)
         {
@@ -736,6 +825,12 @@ int main(int argc, char* argv[])
             "worker can destroy a previously used completed group") && passed;
         passed = testIsolatedChild(unfinishedWorkerGroupMode, expectedTerminateExit,
             "worker destruction of an unfinished group terminates in the isolated child") && passed;
+#endif
+#if JOBKIT_TEST_SUBMISSION_FAILURE
+        passed = testIsolatedChild(groupedSubmissionFailureMode, 0,
+            "grouped submission copy failure preserves the exception, rolls back counts, and allows reuse") && passed;
+        passed = testIsolatedChild(ungroupedSubmissionFailureMode, 0,
+            "ungrouped submission copy failure executes no work and allows pool reuse") && passed;
 #endif
         std::cout << "All enabled tests finished: " << (passed ? "PASS" : "FAIL") << '\n';
         return passed ? 0 : 1;
